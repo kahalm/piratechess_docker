@@ -15,17 +15,20 @@ public class ExportBackgroundService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHubContext<ExportProgressHub> _hub;
     private readonly ILogger<ExportBackgroundService> _logger;
+    private readonly IChessableHttpService _chessableHttp;
 
     public ExportBackgroundService(
         ExportJobQueue queue,
         IServiceScopeFactory scopeFactory,
         IHubContext<ExportProgressHub> hub,
-        ILogger<ExportBackgroundService> logger)
+        ILogger<ExportBackgroundService> logger,
+        IChessableHttpService chessableHttp)
     {
         _queue = queue;
         _scopeFactory = scopeFactory;
         _hub = hub;
         _logger = logger;
+        _chessableHttp = chessableHttp;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -61,19 +64,39 @@ public class ExportBackgroundService : BackgroundService
             return;
         }
 
-        var lib = new piratechess_lib.PirateChessLib();
-        string loginResult;
+        // --- Login phase via ChessableHttpService ---
+        string bearer;
+        string uid;
 
         if (cred.UseBearer && cred.EncryptedBearer is not null)
         {
-            var bearer = encryption.Decrypt(cred.EncryptedBearer);
-            loginResult = lib.LoginWithBearer(bearer);
+            bearer = encryption.Decrypt(cred.EncryptedBearer);
+            var (extractedUid, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+            if (uidError is not null)
+            {
+                await FailExportAsync(job, $"Invalid bearer token: {uidError}");
+                return;
+            }
+            uid = extractedUid;
         }
         else if (!cred.UseBearer && cred.EncryptedEmail is not null && cred.EncryptedPassword is not null)
         {
             var email = encryption.Decrypt(cred.EncryptedEmail);
             var password = encryption.Decrypt(cred.EncryptedPassword);
-            loginResult = lib.Login(email, password);
+            var (jwt, loginError) = await _chessableHttp.LoginAsync(email, password, ct);
+            if (loginError is not null)
+            {
+                await FailExportAsync(job, $"Login failed: {loginError}");
+                return;
+            }
+            bearer = jwt!;
+            var (extractedUid, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+            if (uidError is not null)
+            {
+                await FailExportAsync(job, $"Invalid token after login: {uidError}");
+                return;
+            }
+            uid = extractedUid;
         }
         else
         {
@@ -81,13 +104,56 @@ public class ExportBackgroundService : BackgroundService
             return;
         }
 
-        if (!string.IsNullOrEmpty(loginResult))
+        var userGroup = $"user-{job.UserId}";
+        int chaptersDone = 0;
+        int chaptersTotal = 0;
+        int linesDone = 0;
+
+        // --- Data fetch phase via ChessableHttpService ---
+        var (fetchedData, fetchError) = await _chessableHttp.FetchCourseDataAsync(
+            bearer, uid, job.ChessableBid,
+            onChapterProgress: counter =>
+            {
+                var parts = counter.Split('/');
+                if (parts.Length == 2)
+                {
+                    int.TryParse(parts[0].Trim(), out chaptersDone);
+                    int.TryParse(parts[1].Trim(), out chaptersTotal);
+                }
+
+                var msg = new ExportProgressMessage(
+                    job.ExportId, "Chapter", $"Chapter {counter}",
+                    chaptersDone, chaptersTotal, linesDone);
+                _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+            },
+            onCumulativeLines: total =>
+            {
+                int.TryParse(total.Trim(), out linesDone);
+
+                var msg = new ExportProgressMessage(
+                    job.ExportId, "Line", $"Lines: {total}",
+                    chaptersDone, chaptersTotal, linesDone);
+                _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+            },
+            onRetry: retryMsg =>
+            {
+                var msg = new ExportProgressMessage(
+                    job.ExportId, "Retry", retryMsg,
+                    chaptersDone, chaptersTotal, linesDone);
+                _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+            },
+            ct: ct);
+
+        if (fetchError is not null)
         {
-            await FailExportAsync(job, $"Login failed: {loginResult}");
+            await FailExportAsync(job, fetchError);
             return;
         }
 
-        // Configure training mode
+        // --- PGN generation phase via piratechess_lib (useLocalData: true) ---
+        var lib = new piratechess_lib.PirateChessLib();
+        lib.restResponseCourse = fetchedData;
+
         switch (job.TrainingMode)
         {
             case "AllKeyMoves":
@@ -104,12 +170,7 @@ public class ExportBackgroundService : BackgroundService
                 break;
         }
 
-        var userGroup = $"user-{job.UserId}";
-        int chaptersDone = 0;
-        int chaptersTotal = 0;
-        int linesDone = 0;
-
-        // Register progress events
+        // Progress events still fire during useLocalData PGN generation
         lib.SetChapterCounterEvent(counter =>
         {
             var parts = counter.Split('/');
@@ -120,7 +181,7 @@ public class ExportBackgroundService : BackgroundService
             }
 
             var msg = new ExportProgressMessage(
-                job.ExportId, "Chapter", $"Chapter {counter}",
+                job.ExportId, "PGN", $"Generating PGN: Chapter {counter}",
                 chaptersDone, chaptersTotal, linesDone);
             _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
         });
@@ -130,21 +191,12 @@ public class ExportBackgroundService : BackgroundService
             int.TryParse(total.Trim(), out linesDone);
 
             var msg = new ExportProgressMessage(
-                job.ExportId, "Line", $"Lines: {total}",
+                job.ExportId, "PGN", $"Generating PGN: Lines {total}",
                 chaptersDone, chaptersTotal, linesDone);
             _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
         });
 
-        lib.SetRetryEvent(retryMsg =>
-        {
-            var msg = new ExportProgressMessage(
-                job.ExportId, "Retry", retryMsg,
-                chaptersDone, chaptersTotal, linesDone);
-            _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
-        });
-
-        // Run the export (synchronous lib call, runs on thread pool)
-        var (pgn, courseName) = await Task.Run(() => lib.GetCourse(job.ChessableBid), ct);
+        var (pgn, courseName) = await Task.Run(() => lib.GetCourse(job.ChessableBid, useLocalData: true), ct);
 
         if (string.IsNullOrEmpty(pgn))
         {
@@ -168,8 +220,8 @@ public class ExportBackgroundService : BackgroundService
         }
 
         cachedCourse.CourseName = courseName;
-        cachedCourse.RestResponseJson = lib.restResponseCourse is not null
-            ? JsonSerializer.Serialize(lib.restResponseCourse)
+        cachedCourse.RestResponseJson = fetchedData is not null
+            ? JsonSerializer.Serialize(fetchedData)
             : "{}";
         cachedCourse.CachedAt = DateTime.UtcNow;
 

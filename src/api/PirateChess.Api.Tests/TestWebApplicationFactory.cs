@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using PirateChess.Api.Data;
+using PirateChess.Api.Services;
 
 namespace PirateChess.Api.Tests;
 
@@ -42,6 +43,14 @@ public class TestWebApplicationFactory : WebApplicationFactory<Program>
             // Re-add with InMemory
             services.AddDbContext<AppDbContext>(options =>
                 options.UseInMemoryDatabase(_dbName));
+
+            // Replace ChessableHttpService with fake for tests
+            var chessableDescriptor = services.FirstOrDefault(d =>
+                d.ServiceType == typeof(IChessableHttpService));
+            if (chessableDescriptor is not null)
+                services.Remove(chessableDescriptor);
+
+            services.AddSingleton<IChessableHttpService, FakeChessableHttpService>();
         });
 
         builder.UseEnvironment("Development");

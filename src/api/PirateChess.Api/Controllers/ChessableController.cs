@@ -16,11 +16,13 @@ public class ChessableController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly EncryptionService _encryption;
+    private readonly IChessableHttpService _chessableHttp;
 
-    public ChessableController(AppDbContext db, EncryptionService encryption)
+    public ChessableController(AppDbContext db, EncryptionService encryption, IChessableHttpService chessableHttp)
     {
         _db = db;
         _encryption = encryption;
+        _chessableHttp = chessableHttp;
     }
 
     private int UserId => int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -84,28 +86,43 @@ public class ChessableController : ControllerBase
 
         try
         {
-            var lib = new piratechess_lib.PirateChessLib();
-            string result;
+            string? bearer;
+            string uid;
 
             if (cred.UseBearer && cred.EncryptedBearer is not null)
             {
-                var bearer = _encryption.Decrypt(cred.EncryptedBearer);
-                result = lib.LoginWithBearer(bearer);
+                bearer = _encryption.Decrypt(cred.EncryptedBearer);
+                var (extractedUid, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+                if (uidError is not null)
+                    return BadRequest(new { message = $"Login failed: {uidError}" });
+                uid = extractedUid;
             }
             else if (!cred.UseBearer && cred.EncryptedEmail is not null && cred.EncryptedPassword is not null)
             {
                 var email = _encryption.Decrypt(cred.EncryptedEmail);
                 var password = _encryption.Decrypt(cred.EncryptedPassword);
-                result = lib.Login(email, password);
+                var (jwt, loginError) = await _chessableHttp.LoginAsync(email, password);
+                if (loginError is not null)
+                {
+                    var cleanMessage = loginError.Trim() is "{}" or "" ? "Invalid credentials" : loginError;
+                    return BadRequest(new { message = $"Login failed: {cleanMessage}" });
+                }
+                bearer = jwt!;
+                var (extractedUid, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+                if (uidError is not null)
+                    return BadRequest(new { message = $"Login failed: {uidError}" });
+                uid = extractedUid;
             }
             else
             {
                 return BadRequest(new { message = "Incomplete credentials" });
             }
 
-            if (!string.IsNullOrEmpty(result))
+            // Validate by fetching courses
+            var (courses, error) = await _chessableHttp.GetCoursesAsync(bearer, uid);
+            if (error is not null)
             {
-                var cleanMessage = result.Trim() is "{}" or "" ? "Invalid credentials" : result;
+                var cleanMessage = error.Trim() is "{}" or "" ? "Invalid credentials" : error;
                 return BadRequest(new { message = $"Login failed: {cleanMessage}" });
             }
 
@@ -128,31 +145,41 @@ public class ChessableController : ControllerBase
 
         try
         {
-            var lib = new piratechess_lib.PirateChessLib();
-            string loginResult;
+            string? bearer;
+            string uid;
 
             if (cred.UseBearer && cred.EncryptedBearer is not null)
             {
-                var bearer = _encryption.Decrypt(cred.EncryptedBearer);
-                loginResult = lib.LoginWithBearer(bearer);
+                bearer = _encryption.Decrypt(cred.EncryptedBearer);
+                var (extractedUid, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+                if (uidError is not null)
+                    return BadRequest(new { message = $"Login failed: {uidError}" });
+                uid = extractedUid;
             }
             else if (!cred.UseBearer && cred.EncryptedEmail is not null && cred.EncryptedPassword is not null)
             {
                 var email = _encryption.Decrypt(cred.EncryptedEmail);
                 var password = _encryption.Decrypt(cred.EncryptedPassword);
-                loginResult = lib.Login(email, password);
+                var (jwt, loginError) = await _chessableHttp.LoginAsync(email, password);
+                if (loginError is not null)
+                    return BadRequest(new { message = $"Login failed: {loginError}" });
+                bearer = jwt!;
+                var (extractedUid, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+                if (uidError is not null)
+                    return BadRequest(new { message = $"Login failed: {uidError}" });
+                uid = extractedUid;
             }
             else
             {
                 return BadRequest(new { message = "Incomplete credentials" });
             }
 
-            if (!string.IsNullOrEmpty(loginResult))
-                return BadRequest(new { message = $"Login failed: {loginResult}" });
+            var (courses, error) = await _chessableHttp.GetCoursesAsync(bearer, uid);
+            if (error is not null)
+                return BadRequest(new { message = $"Failed to fetch courses: {error}" });
 
-            var chapters = lib.GetChapters();
-            var courses = chapters.Select(c => new CourseListItem(c.Key, c.Value)).ToList();
-            return Ok(courses);
+            var result = courses!.Select(c => new CourseListItem(c.Key, c.Value)).ToList();
+            return Ok(result);
         }
         catch (Exception ex)
         {

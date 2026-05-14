@@ -140,14 +140,12 @@ public class ChessableControllerTests : IClassFixture<TestWebApplicationFactory>
     }
 
     [Fact]
-    public async Task TestCredentials_LoginReturnsEmptyJson_ShowsInvalidCredentials()
+    public async Task TestCredentials_InvalidBearer_ReturnsBadRequest()
     {
-        // Regression: Chessable API returns "{}" for failed login,
-        // should show "Invalid credentials" not "Login failed: {}"
+        // FakeChessableHttpService returns error for "not-a-real-jwt" in ExtractUidFromBearer
         var (client, _) = await TestHelper.CreateAuthenticatedClientAsync(_factory,
             "cred_emptyjson_" + Guid.NewGuid().ToString("N")[..6]);
 
-        // Save fake bearer that will cause LoginWithBearer to throw/fail
         await client.PostAsJsonAsync("/api/chessable/credentials", new
         {
             UseBearer = true,
@@ -158,7 +156,48 @@ public class ChessableControllerTests : IClassFixture<TestWebApplicationFactory>
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.DoesNotContain("{}", body);
+        Assert.Contains("Login failed", body);
+    }
+
+    [Fact]
+    public async Task TestCredentials_ValidBearer_ReturnsSuccess()
+    {
+        // FakeChessableHttpService accepts any bearer except "not-a-real-jwt"
+        var (client, _) = await TestHelper.CreateAuthenticatedClientAsync(_factory,
+            "cred_testvalid_" + Guid.NewGuid().ToString("N")[..6]);
+
+        await client.PostAsJsonAsync("/api/chessable/credentials", new
+        {
+            UseBearer = true,
+            Bearer = "valid-bearer-token"
+        });
+
+        var response = await client.PostAsJsonAsync("/api/chessable/test", new { });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("Login successful", body);
+    }
+
+    [Fact]
+    public async Task TestCredentials_InvalidEmailPassword_ReturnsBadRequest()
+    {
+        // FakeChessableHttpService rejects all except valid@chessable.com / valid
+        var (client, _) = await TestHelper.CreateAuthenticatedClientAsync(_factory,
+            "cred_testinvalid_" + Guid.NewGuid().ToString("N")[..6]);
+
+        await client.PostAsJsonAsync("/api/chessable/credentials", new
+        {
+            UseBearer = false,
+            Email = "wrong@chessable.com",
+            Password = "wrongpass"
+        });
+
+        var response = await client.PostAsJsonAsync("/api/chessable/test", new { });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("Login failed", body);
     }
 
     [Fact]
@@ -210,6 +249,26 @@ public class ChessableControllerTests : IClassFixture<TestWebApplicationFactory>
         var response = await client.GetAsync("/api/chessable/courses");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetCourses_WithValidBearer_ReturnsCourseList()
+    {
+        var (client, _) = await TestHelper.CreateAuthenticatedClientAsync(_factory,
+            "cred_courselist_" + Guid.NewGuid().ToString("N")[..6]);
+
+        await client.PostAsJsonAsync("/api/chessable/credentials", new
+        {
+            UseBearer = true,
+            Bearer = "valid-bearer-token"
+        });
+
+        var response = await client.GetAsync("/api/chessable/courses");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("Test Course 1", body);
+        Assert.Contains("Test Course 2", body);
     }
 
     private record CredentialResp(int Id, bool UseBearer, bool HasCredentials, string? MaskedBearer, string? MaskedEmail, string? MaskedPassword);

@@ -54,8 +54,8 @@ builder.Services.AddScoped<AuthService>();
 builder.Services.AddSingleton<EncryptionService>();
 builder.Services.AddSingleton<ExportJobQueue>();
 
-// HTTP client for Chessable (routed through VPN proxy)
-builder.Services.AddChessableHttpClient(builder.Configuration);
+// Chessable HTTP service (curl-impersonate for TLS fingerprint bypass)
+builder.Services.AddSingleton<IChessableHttpService, ChessableHttpService>();
 
 // Background export worker
 builder.Services.AddHostedService<ExportBackgroundService>();
