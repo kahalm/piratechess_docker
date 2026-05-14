@@ -1,0 +1,11 @@
+.git
+.env
+db_data/
+node_modules/
+**/bin/
+**/obj/
+**/dist/
+*.md
+.vs/
+.vscode/
+.idea/

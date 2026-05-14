@@ -1,0 +1,28 @@
+# Environment
+.env
+
+# Claude
+.claude/
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Node
+node_modules/
+dist/
+
+# Docker volumes
+db_data/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store

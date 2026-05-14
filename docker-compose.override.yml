@@ -1,0 +1,21 @@
+services:
+  api:
+    build:
+      target: dev
+    volumes:
+      - ./src/api/PirateChess.Api:/app/src/api/PirateChess.Api
+      - ./piratechess/piratechess_lib:/app/piratechess/piratechess_lib
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+    entrypoint: ["dotnet", "watch", "run", "--project", "/app/src/api/PirateChess.Api"]
+
+  frontend:
+    build:
+      context: ./src/frontend/app
+      dockerfile: ../Dockerfile.dev
+    volumes:
+      - ./src/frontend/app/src:/app/src
+    ports:
+      - "8080:5173"
+    depends_on:
+      - api
