@@ -11,7 +11,7 @@ public class EncryptionService
     {
         var keyString = configuration["Encryption:Key"]
             ?? throw new InvalidOperationException("Encryption:Key not configured");
-        _key = Encoding.UTF8.GetBytes(keyString[..32]);
+        _key = Encoding.UTF8.GetBytes(keyString.PadRight(32, '0')[..32]);
     }
 
     public string Encrypt(string plainText)

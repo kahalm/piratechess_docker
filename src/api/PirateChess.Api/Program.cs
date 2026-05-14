@@ -57,6 +57,9 @@ builder.Services.AddSingleton<ExportJobQueue>();
 // HTTP client for Chessable (routed through VPN proxy)
 builder.Services.AddChessableHttpClient(builder.Configuration);
 
+// Background export worker
+builder.Services.AddHostedService<ExportBackgroundService>();
+
 // SignalR
 builder.Services.AddSignalR();
 
@@ -70,7 +73,7 @@ builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.WithOrigins("http://localhost:5173", "http://localhost:8080")
+        policy.WithOrigins("http://localhost:5173", "http://localhost:8080", "http://localhost:8084")
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
@@ -79,11 +82,12 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Auto-migrate on startup
+// Auto-migrate on startup (skip for InMemory DB in tests)
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Database.Migrate();
+    if (db.Database.IsRelational())
+        db.Database.Migrate();
 }
 
 if (app.Environment.IsDevelopment())
@@ -100,3 +104,6 @@ app.MapControllers();
 app.MapHub<ExportProgressHub>("/hubs/export-progress");
 
 app.Run();
+
+// Marker class for WebApplicationFactory<Program> in tests
+public partial class Program { }

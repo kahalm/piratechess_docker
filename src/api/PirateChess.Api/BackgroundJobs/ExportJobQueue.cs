@@ -2,7 +2,7 @@ using System.Threading.Channels;
 
 namespace PirateChess.Api.BackgroundJobs;
 
-public record ExportJobRequest(int UserId, string ChessableBid, string TrainingMode);
+public record ExportJobRequest(int UserId, int ExportId, string ChessableBid, string CourseName, string TrainingMode);
 
 public class ExportJobQueue
 {
