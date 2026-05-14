@@ -104,7 +104,10 @@ public class ChessableController : ControllerBase
             }
 
             if (!string.IsNullOrEmpty(result))
-                return BadRequest(new { message = $"Login failed: {result}" });
+            {
+                var cleanMessage = result.Trim() is "{}" or "" ? "Invalid credentials" : result;
+                return BadRequest(new { message = $"Login failed: {cleanMessage}" });
+            }
 
             return Ok(new { message = "Login successful" });
         }

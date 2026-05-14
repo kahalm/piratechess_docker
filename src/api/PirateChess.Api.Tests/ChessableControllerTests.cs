@@ -140,6 +140,28 @@ public class ChessableControllerTests : IClassFixture<TestWebApplicationFactory>
     }
 
     [Fact]
+    public async Task TestCredentials_LoginReturnsEmptyJson_ShowsInvalidCredentials()
+    {
+        // Regression: Chessable API returns "{}" for failed login,
+        // should show "Invalid credentials" not "Login failed: {}"
+        var (client, _) = await TestHelper.CreateAuthenticatedClientAsync(_factory,
+            "cred_emptyjson_" + Guid.NewGuid().ToString("N")[..6]);
+
+        // Save fake bearer that will cause LoginWithBearer to throw/fail
+        await client.PostAsJsonAsync("/api/chessable/credentials", new
+        {
+            UseBearer = true,
+            Bearer = "not-a-real-jwt"
+        });
+
+        var response = await client.PostAsJsonAsync("/api/chessable/test", new { });
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.DoesNotContain("{}", body);
+    }
+
+    [Fact]
     public async Task SaveCredentials_Bearer_ReturnsMaskedBearer()
     {
         var (client, _) = await TestHelper.CreateAuthenticatedClientAsync(_factory,
