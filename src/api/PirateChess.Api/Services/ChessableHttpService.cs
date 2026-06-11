@@ -12,14 +12,25 @@ public class ChessableHttpService : IChessableHttpService
     private readonly string _curlPath;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
+    // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
+    private const string TlsFlags =
+        "--ciphers TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256,"
+        + "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,"
+        + "ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,"
+        + "ECDHE-ECDSA-CHACHA20-POLY1305,ECDHE-RSA-CHACHA20-POLY1305,"
+        + "ECDHE-RSA-AES128-SHA,ECDHE-RSA-AES256-SHA,"
+        + "AES128-GCM-SHA256,AES256-GCM-SHA384,AES128-SHA,AES256-SHA"
+        + " --http2 --http2-no-server-push --compressed"
+        + " --tlsv1.2 --alps --tls-permute-extensions"
+        + " --cert-compression brotli";
+
     public ChessableHttpService(ILogger<ChessableHttpService> logger)
     {
         _logger = logger;
 
-        // Prefer curl_chrome116 but fall back to curl_chrome if not found
-        _curlPath = File.Exists("/usr/local/bin/curl_chrome116")
-            ? "/usr/local/bin/curl_chrome116"
-            : "/usr/local/bin/curl_chrome110";
+        // Use curl-impersonate-chrome binary directly (NOT the wrapper scripts
+        // which add their own browser headers causing duplicates)
+        _curlPath = "/usr/local/bin/curl-impersonate-chrome";
     }
 
     public async Task<(string? jwt, string? error)> LoginAsync(string email, string password, CancellationToken ct = default)
@@ -273,7 +284,7 @@ public class ChessableHttpService : IChessableHttpService
 
     private async Task<string> RunCurlAsync(string args, string? stdinBody, CancellationToken ct)
     {
-        _logger.LogDebug("curl: {Path} {Args}", _curlPath, args);
+        _logger.LogInformation("curl: {Path}", _curlPath);
 
         var psi = new ProcessStartInfo
         {
@@ -305,13 +316,16 @@ public class ChessableHttpService : IChessableHttpService
             _logger.LogWarning("curl exited with code {Code}: {Stderr}", process.ExitCode, stderr);
         }
 
+        _logger.LogInformation("curl response length: {Length}, preview: {Preview}",
+            stdout.Length, stdout.Length > 100 ? stdout[..100] + "..." : stdout);
+
         return stdout;
     }
 
     private static string BuildGetArgs(string url, string bearer)
     {
         var sb = new StringBuilder();
-        sb.Append("-s -S --compressed");
+        sb.Append($"-s -S {TlsFlags}");
         sb.Append($" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0\"");
         sb.Append($" -H \"accept: application/json, text/plain, */*\"");
         sb.Append($" -H \"accept-language: en\"");
@@ -336,7 +350,7 @@ public class ChessableHttpService : IChessableHttpService
     private static string BuildPostArgs(string url)
     {
         var sb = new StringBuilder();
-        sb.Append("-s -S --compressed -X POST");
+        sb.Append($"-s -S {TlsFlags} -X POST");
         sb.Append($" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0\"");
         sb.Append($" -H \"accept: application/json, text/plain, */*\"");
         sb.Append($" -H \"accept-language: en\"");
