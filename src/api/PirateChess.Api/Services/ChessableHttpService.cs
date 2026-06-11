@@ -2,13 +2,17 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using piratechess_lib;
+using PirateChess.Api.Data;
+using PirateChess.Api.Models.Entities;
 
 namespace PirateChess.Api.Services;
 
 public class ChessableHttpService : IChessableHttpService
 {
     private readonly ILogger<ChessableHttpService> _logger;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly string _curlPath;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
@@ -24,9 +28,12 @@ public class ChessableHttpService : IChessableHttpService
         + " --tlsv1.2 --alps --tls-permute-extensions"
         + " --cert-compression brotli";
 
-    public ChessableHttpService(ILogger<ChessableHttpService> logger)
+    public ChessableHttpService(
+        ILogger<ChessableHttpService> logger,
+        IServiceScopeFactory scopeFactory)
     {
         _logger = logger;
+        _scopeFactory = scopeFactory;
 
         // Use curl-impersonate-chrome binary directly (NOT the wrapper scripts
         // which add their own browser headers causing duplicates)
@@ -57,7 +64,7 @@ public class ChessableHttpService : IChessableHttpService
         string content;
         try
         {
-            content = await CurlPostAsync("https://www.chessable.com/api/v1/authenticate", json, ct);
+            content = await CurlPostAsync("https://www.chessable.com/api/v1/authenticate", json, "login", null, ct);
         }
         catch (Exception ex)
         {
@@ -102,7 +109,7 @@ public class ChessableHttpService : IChessableHttpService
         string content;
         try
         {
-            content = await CurlGetAsync(url, bearer, ct);
+            content = await CurlGetAsync(url, bearer, "courses", uid, ct);
         }
         catch (Exception ex)
         {
@@ -140,7 +147,7 @@ public class ChessableHttpService : IChessableHttpService
         string courseContent;
         try
         {
-            courseContent = await CurlGetAsync(courseUrl, bearer, ct);
+            courseContent = await CurlGetAsync(courseUrl, bearer, "course", uid, ct);
         }
         catch (Exception ex)
         {
@@ -182,7 +189,7 @@ public class ChessableHttpService : IChessableHttpService
             string chapterContent;
             try
             {
-                chapterContent = await CurlGetAsync(chapterUrl, bearer, ct);
+                chapterContent = await CurlGetAsync(chapterUrl, bearer, "chapter", uid, ct);
             }
             catch (Exception ex)
             {
@@ -225,7 +232,7 @@ public class ChessableHttpService : IChessableHttpService
 
                     try
                     {
-                        lineContent = await CurlGetAsync(lineUrl, bearer, ct);
+                        lineContent = await CurlGetAsync(lineUrl, bearer, "line", uid, ct);
                     }
                     catch (Exception ex)
                     {
@@ -270,19 +277,19 @@ public class ChessableHttpService : IChessableHttpService
         return (restResponseCourse, null);
     }
 
-    private async Task<string> CurlGetAsync(string url, string bearer, CancellationToken ct)
+    private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct)
     {
         var args = BuildGetArgs(url, bearer);
-        return await RunCurlAsync(args, null, ct);
+        return await RunCurlAsync(args, null, url, endpoint, chessableUid, ct);
     }
 
-    private async Task<string> CurlPostAsync(string url, string body, CancellationToken ct)
+    private async Task<string> CurlPostAsync(string url, string body, string endpoint, string? chessableUid, CancellationToken ct)
     {
         var args = BuildPostArgs(url);
-        return await RunCurlAsync(args, body, ct);
+        return await RunCurlAsync(args, body, url, endpoint, chessableUid, ct);
     }
 
-    private async Task<string> RunCurlAsync(string args, string? stdinBody, CancellationToken ct)
+    private async Task<string> RunCurlAsync(string args, string? stdinBody, string url, string endpoint, string? chessableUid, CancellationToken ct)
     {
         _logger.LogInformation("curl: {Path}", _curlPath);
 
@@ -297,29 +304,76 @@ public class ChessableHttpService : IChessableHttpService
             CreateNoWindow = true
         };
 
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start {_curlPath}");
+        var sw = Stopwatch.StartNew();
+        string stdout = "";
+        int exitCode = -1;
+        string? error = null;
 
-        if (stdinBody is not null)
+        try
         {
-            await process.StandardInput.WriteAsync(stdinBody.AsMemory(), ct);
-            process.StandardInput.Close();
+            using var process = Process.Start(psi)
+                ?? throw new InvalidOperationException($"Failed to start {_curlPath}");
+
+            if (stdinBody is not null)
+            {
+                await process.StandardInput.WriteAsync(stdinBody.AsMemory(), ct);
+                process.StandardInput.Close();
+            }
+
+            stdout = await process.StandardOutput.ReadToEndAsync(ct);
+            var stderr = await process.StandardError.ReadToEndAsync(ct);
+
+            await process.WaitForExitAsync(ct);
+            exitCode = process.ExitCode;
+
+            if (exitCode != 0)
+            {
+                _logger.LogWarning("curl exited with code {Code}: {Stderr}", exitCode, stderr);
+                error = stderr;
+            }
+
+            _logger.LogInformation("curl response length: {Length}, preview: {Preview}",
+                stdout.Length, stdout.Length > 100 ? stdout[..100] + "..." : stdout);
         }
-
-        var stdout = await process.StandardOutput.ReadToEndAsync(ct);
-        var stderr = await process.StandardError.ReadToEndAsync(ct);
-
-        await process.WaitForExitAsync(ct);
-
-        if (process.ExitCode != 0)
+        catch (Exception ex)
         {
-            _logger.LogWarning("curl exited with code {Code}: {Stderr}", process.ExitCode, stderr);
+            error = ex.Message;
+            throw;
         }
-
-        _logger.LogInformation("curl response length: {Length}, preview: {Preview}",
-            stdout.Length, stdout.Length > 100 ? stdout[..100] + "..." : stdout);
+        finally
+        {
+            sw.Stop();
+            await PersistRawResponseAsync(endpoint, chessableUid, url, exitCode, stdout, (int)sw.ElapsedMilliseconds, error, ct);
+        }
 
         return stdout;
+    }
+
+    private async Task PersistRawResponseAsync(string endpoint, string? chessableUid, string url,
+        int statusCode, string body, int durationMs, string? errorMessage, CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.ChessableRawResponses.Add(new ChessableRawResponse
+            {
+                Endpoint = endpoint,
+                ChessableUid = chessableUid,
+                Url = url.Length > 500 ? url[..500] : url,
+                StatusCode = statusCode,
+                RawJson = body ?? string.Empty,
+                DurationMs = durationMs,
+                ErrorMessage = errorMessage,
+                RequestedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            // Logging-Persistenz darf den eigentlichen Call nicht killen.
+            _logger.LogWarning(ex, "Failed to persist ChessableRawResponse for {Endpoint}", endpoint);
+        }
     }
 
     private static string BuildGetArgs(string url, string bearer)

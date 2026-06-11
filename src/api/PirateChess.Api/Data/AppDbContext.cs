@@ -12,6 +12,7 @@ public class AppDbContext : DbContext
     public DbSet<CachedCourse> CachedCourses => Set<CachedCourse>();
     public DbSet<GeneratedPgn> GeneratedPgns => Set<GeneratedPgn>();
     public DbSet<ExportHistory> ExportHistories => Set<ExportHistory>();
+    public DbSet<ChessableRawResponse> ChessableRawResponses => Set<ChessableRawResponse>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -57,6 +58,16 @@ public class AppDbContext : DbContext
                 .WithMany(u => u.ExportHistories)
                 .HasForeignKey(h => h.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ChessableRawResponse>(e =>
+        {
+            e.Property(r => r.RawJson).HasColumnType("LONGTEXT");
+            e.Property(r => r.Endpoint).HasMaxLength(50);
+            e.Property(r => r.Url).HasMaxLength(500);
+            e.Property(r => r.ChessableUid).HasMaxLength(50);
+            e.HasIndex(r => new { r.ChessableUid, r.RequestedAt });
+            e.HasIndex(r => r.Endpoint);
         });
     }
 }
