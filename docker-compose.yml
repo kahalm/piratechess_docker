@@ -60,6 +60,11 @@ services:
       Encryption__Key: ${ENCRYPTION_KEY}
       Service__ApiKey: ${SERVICE_API_KEY}
       Chessable__ProxyUrl: http://gluetun:8888
+      # Strukturierte Logs (Serilog) gehen ins selbe Elasticsearch wie rookhub
+      # → eigener Index `piratechess-logs-*`. URL leer lassen deaktiviert den
+      # ES-Sink (Console-Logger bleibt aktiv).
+      Elasticsearch__Url: ${ELASTICSEARCH_URL:-}
+      Elasticsearch__IndexFormat: ${ELASTICSEARCH_INDEX_FORMAT:-piratechess-logs-{0:yyyy.MM}}
     ports:
       - "5000:8080"
     depends_on:

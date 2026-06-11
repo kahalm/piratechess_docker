@@ -7,8 +7,38 @@ using PirateChess.Api.BackgroundJobs;
 using PirateChess.Api.Data;
 using PirateChess.Api.Hubs;
 using PirateChess.Api.Services;
+using Serilog;
+using Serilog.Context;
+using Serilog.Events;
+using Elastic.Serilog.Sinks;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((context, services, configuration) =>
+{
+    configuration
+        .MinimumLevel.Information()
+        .MinimumLevel.Override("Microsoft.AspNetCore", LogEventLevel.Warning)
+        .MinimumLevel.Override("Microsoft.EntityFrameworkCore", LogEventLevel.Warning)
+        .Enrich.FromLogContext()
+        .Enrich.WithMachineName()
+        .Enrich.WithProperty("Application", "PirateChess")
+        .WriteTo.Console();
+
+    var esUrl = context.Configuration["Elasticsearch:Url"];
+    if (!string.IsNullOrEmpty(esUrl))
+    {
+        // ECS-Schema (Elastic.Serilog.Sinks) in einen Data-Stream. Eigener Index
+        // `piratechess-logs-*`; rookhub/log-watcher koennen das Pattern mitlesen.
+        var indexFormat = context.Configuration["Elasticsearch:IndexFormat"] ?? "piratechess-logs-{0:yyyy.MM}";
+        var streamName = indexFormat.Split('{')[0].TrimEnd('-', '.', ' ');
+        configuration.WriteTo.Elasticsearch([new Uri(esUrl)], opts =>
+        {
+            opts.DataStream = new Elastic.Ingest.Elasticsearch.DataStreams.DataStreamName(streamName);
+            opts.BootstrapMethod = Elastic.Ingest.Elasticsearch.BootstrapMethod.Silent;
+        });
+    }
+});
 
 // Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
@@ -98,6 +128,39 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors();
 app.UseAuthentication();
+
+// Reichert jedes Log-Event im Request mit UserId/UserName/IpAddress an (analog rookhub).
+app.Use(async (ctx, next) =>
+{
+    var scopes = new List<IDisposable>(3);
+    var ip = ctx.Connection.RemoteIpAddress?.ToString();
+    if (!string.IsNullOrEmpty(ip))
+        scopes.Add(LogContext.PushProperty("IpAddress", ip));
+    if (ctx.User?.Identity?.IsAuthenticated == true)
+    {
+        var userId = ctx.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!string.IsNullOrEmpty(userId))
+            scopes.Add(LogContext.PushProperty("UserId", userId));
+        if (!string.IsNullOrEmpty(ctx.User.Identity.Name))
+            scopes.Add(LogContext.PushProperty("UserName", ctx.User.Identity.Name));
+    }
+    try { await next(); }
+    finally { for (var i = scopes.Count - 1; i >= 0; i--) scopes[i].Dispose(); }
+});
+
+app.UseSerilogRequestLogging(options =>
+{
+    options.GetLevel = (httpContext, elapsed, ex) =>
+    {
+        var path = httpContext.Request.Path.Value ?? "";
+        if (path.StartsWith("/health") || path.StartsWith("/swagger"))
+            return LogEventLevel.Debug;
+        if (ex != null || httpContext.Response.StatusCode >= 500)
+            return LogEventLevel.Error;
+        return LogEventLevel.Information;
+    };
+});
+
 app.UseAuthorization();
 
 app.MapControllers();

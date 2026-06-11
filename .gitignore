@@ -26,3 +26,8 @@ db_data/
 # OS
 Thumbs.db
 .DS_Store
+
+# Test artifacts
+TestResults/
+diag.log
+diag.host*.log
