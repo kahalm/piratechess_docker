@@ -58,6 +58,7 @@ services:
       Jwt__Issuer: ${JWT_ISSUER}
       Jwt__Audience: ${JWT_AUDIENCE}
       Encryption__Key: ${ENCRYPTION_KEY}
+      Service__ApiKey: ${SERVICE_API_KEY}
       Chessable__ProxyUrl: http://gluetun:8888
     ports:
       - "5000:8080"
@@ -66,6 +67,9 @@ services:
         condition: service_healthy
       gluetun:
         condition: service_healthy
+    networks:
+      - default
+      - chessable-bridge
 
   frontend:
     build:
@@ -79,3 +83,10 @@ services:
 volumes:
   db_data:
   gluetun_data:
+
+networks:
+  # Inter-stack bridge so rookhub-api can reach piratechess-api by its
+  # container name. The network is named explicitly (not project-prefixed)
+  # so other compose projects can join it as `external: true`.
+  chessable-bridge:
+    name: chessable-bridge

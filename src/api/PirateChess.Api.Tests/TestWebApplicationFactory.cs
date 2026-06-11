@@ -22,6 +22,7 @@ public class TestWebApplicationFactory : WebApplicationFactory<Program>
                 ["Jwt:Issuer"] = "TestIssuer",
                 ["Jwt:Audience"] = "TestAudience",
                 ["Encryption:Key"] = "TestEncryptionKey32CharsLong!!!!",
+                ["Service:ApiKey"] = "test-service-key",
             });
         });
 
