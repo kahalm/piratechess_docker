@@ -17,15 +17,18 @@ public class ChessableDirectController : ControllerBase
 {
     private readonly IChessableHttpService _chessableHttp;
     private readonly CourseFetchJobStore _jobStore;
+    private readonly RawCourseCache _rawCache;
     private readonly ILogger<ChessableDirectController> _logger;
 
     public ChessableDirectController(
         IChessableHttpService chessableHttp,
         CourseFetchJobStore jobStore,
+        RawCourseCache rawCache,
         ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
         _jobStore = jobStore;
+        _rawCache = rawCache;
         _logger = logger;
     }
 
@@ -93,12 +96,18 @@ public class ChessableDirectController : ControllerBase
         if (uidError is not null)
             return BadRequest(new { message = uidError });
 
-        var (data, fetchError) = await _chessableHttp.FetchCourseDataAsync(request.Bearer, uid, request.Bid, ct: ct);
-        if (fetchError is not null)
+        var data = _rawCache.Get(uid, request.Bid);
+        if (data is null)
         {
-            var cleanMessage = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
-            _logger.LogWarning("Course fetch failed for bid {Bid} (uid {Uid}): {Error}", request.Bid, uid, cleanMessage);
-            return BadRequest(new { message = cleanMessage });
+            var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(request.Bearer, uid, request.Bid, ct: ct);
+            if (fetchError is not null)
+            {
+                var cleanMessage = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
+                _logger.LogWarning("Course fetch failed for bid {Bid} (uid {Uid}): {Error}", request.Bid, uid, cleanMessage);
+                return BadRequest(new { message = cleanMessage });
+            }
+            data = fetched;
+            if (data is not null) _rawCache.Set(uid, request.Bid, data);
         }
 
         var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
@@ -179,26 +188,39 @@ public class ChessableDirectController : ControllerBase
         if (job is null) return;
         try
         {
-            var (data, fetchError) = await _chessableHttp.FetchCourseDataAsync(bearer, uid, bid,
-                onChapterProgress: counter =>
-                {
-                    var parts = counter.Split('/');
-                    if (parts.Length == 2)
-                    {
-                        if (int.TryParse(parts[0].Trim(), out var d)) job.ChaptersDone = d;
-                        if (int.TryParse(parts[1].Trim(), out var t)) job.ChaptersTotal = t;
-                    }
-                },
-                onCumulativeLines: total =>
-                {
-                    if (int.TryParse(total.Trim(), out var l)) job.LinesDone = l;
-                });
-
-            if (fetchError is not null)
+            // Rohdaten aus dem Cache wiederverwenden (z. B. 2. Import desselben Kurses) → kein Chessable-Call.
+            var data = _rawCache.Get(uid, bid);
+            if (data is not null)
             {
-                job.Status = "failed";
-                job.Error = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
-                return;
+                job.ChaptersTotal = data.ChapterList.Count;
+                job.ChaptersDone = data.ChapterList.Count;
+                job.LinesDone = data.ChapterList.Sum(c => c.ResponseLineList.Count);
+            }
+            else
+            {
+                var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(bearer, uid, bid,
+                    onChapterProgress: counter =>
+                    {
+                        var parts = counter.Split('/');
+                        if (parts.Length == 2)
+                        {
+                            if (int.TryParse(parts[0].Trim(), out var d)) job.ChaptersDone = d;
+                            if (int.TryParse(parts[1].Trim(), out var t)) job.ChaptersTotal = t;
+                        }
+                    },
+                    onCumulativeLines: total =>
+                    {
+                        if (int.TryParse(total.Trim(), out var l)) job.LinesDone = l;
+                    });
+
+                if (fetchError is not null)
+                {
+                    job.Status = "failed";
+                    job.Error = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
+                    return;
+                }
+                data = fetched;
+                if (data is not null) _rawCache.Set(uid, bid, data);
             }
 
             var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };

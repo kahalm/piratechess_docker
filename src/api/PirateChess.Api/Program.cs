@@ -84,6 +84,7 @@ builder.Services.AddScoped<AuthService>();
 builder.Services.AddSingleton<EncryptionService>();
 builder.Services.AddSingleton<ExportJobQueue>();
 builder.Services.AddSingleton<CourseFetchJobStore>();
+builder.Services.AddSingleton<RawCourseCache>();
 
 // Chessable HTTP service (curl-impersonate for TLS fingerprint bypass)
 builder.Services.AddSingleton<IChessableHttpService, ChessableHttpService>();
