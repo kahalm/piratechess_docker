@@ -96,7 +96,7 @@ public class ChessableDirectController : ControllerBase
         if (uidError is not null)
             return BadRequest(new { message = uidError });
 
-        var data = _rawCache.Get(uid, request.Bid);
+        var data = await _rawCache.GetAsync(request.Bid, ct);
         if (data is null)
         {
             var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(request.Bearer, uid, request.Bid, ct: ct);
@@ -107,7 +107,7 @@ public class ChessableDirectController : ControllerBase
                 return BadRequest(new { message = cleanMessage });
             }
             data = fetched;
-            if (data is not null) _rawCache.Set(uid, request.Bid, data);
+            if (data is not null) await _rawCache.SetAsync(request.Bid, data, ct);
         }
 
         var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
@@ -188,8 +188,9 @@ public class ChessableDirectController : ControllerBase
         if (job is null) return;
         try
         {
-            // Rohdaten aus dem Cache wiederverwenden (z. B. 2. Import desselben Kurses) → kein Chessable-Call.
-            var data = _rawCache.Get(uid, bid);
+            // Rohdaten aus dem (kurs-/bid-weiten) Cache wiederverwenden → kein Chessable-Call,
+            // auch wenn ein anderer User denselben Kurs schon geholt hat.
+            var data = await _rawCache.GetAsync(bid);
             if (data is not null)
             {
                 job.ChaptersTotal = data.ChapterList.Count;
@@ -220,7 +221,7 @@ public class ChessableDirectController : ControllerBase
                     return;
                 }
                 data = fetched;
-                if (data is not null) _rawCache.Set(uid, bid, data);
+                if (data is not null) await _rawCache.SetAsync(bid, data);
             }
 
             var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
