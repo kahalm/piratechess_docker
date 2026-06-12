@@ -20,6 +20,8 @@ services:
       FIREWALL_INPUT_PORTS: "8888,8000"
     volumes:
       - gluetun_data:/gluetun
+      # Control-Server-Auth: gibt die Rotations-Routen frei (gluetun latest verlangt sonst Auth → "Unauthorized")
+      - ./gluetun-auth.toml:/gluetun/auth/config.toml:ro
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
       interval: 10s

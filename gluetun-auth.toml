@@ -1,0 +1,6 @@
+# gluetun Control-Server-Auth — gibt die IP-Rotations-Routen frei.
+# Control-Port nur intern erreichbar (FIREWALL_INPUT_PORTS). Haertung auf API-Key: siehe rookhub/TODO.md.
+[[roles]]
+name = "rotation"
+routes = ["GET /v1/publicip/ip", "GET /v1/vpn/status", "PUT /v1/vpn/status"]
+auth = "none"
