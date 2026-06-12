@@ -14,6 +14,7 @@ public class ChessableHttpService : IChessableHttpService
     private readonly ILogger<ChessableHttpService> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly string _curlPath;
+    private readonly string? _proxyUrl;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
@@ -30,7 +31,8 @@ public class ChessableHttpService : IChessableHttpService
 
     public ChessableHttpService(
         ILogger<ChessableHttpService> logger,
-        IServiceScopeFactory scopeFactory)
+        IServiceScopeFactory scopeFactory,
+        IConfiguration configuration)
     {
         _logger = logger;
         _scopeFactory = scopeFactory;
@@ -38,6 +40,11 @@ public class ChessableHttpService : IChessableHttpService
         // Use curl-impersonate-chrome binary directly (NOT the wrapper scripts
         // which add their own browser headers causing duplicates)
         _curlPath = "/usr/local/bin/curl-impersonate-chrome";
+
+        // Alle Chessable-Calls über den (VPN-)Proxy schicken, falls konfiguriert
+        // (Chessable:ProxyUrl = http://gluetun:8888) — sonst gehen sie mit der Host-IP
+        // raus und profitieren NICHT von der gluetun-IP-Rotation.
+        _proxyUrl = configuration["Chessable:ProxyUrl"];
     }
 
     public async Task<(string? jwt, string? error)> LoginAsync(string email, string password, CancellationToken ct = default)
@@ -291,12 +298,15 @@ public class ChessableHttpService : IChessableHttpService
 
     private async Task<string> RunCurlAsync(string args, string? stdinBody, string url, string endpoint, string? chessableUid, CancellationToken ct)
     {
-        _logger.LogInformation("curl: {Path}", _curlPath);
+        // curl-impersonate honoriert in unserem Setup keine HTTP(S)_PROXY-Env automatisch
+        // → Proxy explizit als --proxy mitgeben, damit die Calls über gluetun/VPN laufen.
+        var finalArgs = string.IsNullOrEmpty(_proxyUrl) ? args : $"--proxy \"{_proxyUrl}\" {args}";
+        _logger.LogInformation("curl: {Path} (proxy: {Proxy})", _curlPath, _proxyUrl ?? "none");
 
         var psi = new ProcessStartInfo
         {
             FileName = _curlPath,
-            Arguments = args,
+            Arguments = finalArgs,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             RedirectStandardInput = stdinBody is not null,
