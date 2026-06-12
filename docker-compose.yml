@@ -15,6 +15,9 @@ services:
       WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES}
       SERVER_COUNTRIES: ${VPN_SERVER_COUNTRIES:-Netherlands}
       HTTPPROXY: "on"
+      # Control-Server (:8000) für piratechess-api erreichbar machen → IP-Rotation.
+      # 8888 = HTTP-Proxy muss mit aufgeführt bleiben.
+      FIREWALL_INPUT_PORTS: "8888,8000"
     volumes:
       - gluetun_data:/gluetun
     healthcheck:
@@ -60,6 +63,10 @@ services:
       Encryption__Key: ${ENCRYPTION_KEY}
       Service__ApiKey: ${SERVICE_API_KEY}
       Chessable__ProxyUrl: http://gluetun:8888
+      # gluetun-Control-Server für die IP-Rotation (un-proxied). Leer lassen
+      # deaktiviert die Rotation. Default: alle 20 Requests (Vpn__RotateAfterRequests).
+      Gluetun__ControlUrl: ${GLUETUN_CONTROL_URL:-http://gluetun:8000}
+      Vpn__RotateAfterRequests: ${VPN_ROTATE_AFTER_REQUESTS:-20}
       # Strukturierte Logs (Serilog) gehen ins selbe Elasticsearch wie rookhub
       # → eigener Index `piratechess-logs-*`. URL leer lassen deaktiviert den
       # ES-Sink (Console-Logger bleibt aktiv).

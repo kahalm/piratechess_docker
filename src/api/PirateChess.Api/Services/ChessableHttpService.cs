@@ -13,6 +13,7 @@ public class ChessableHttpService : IChessableHttpService
 {
     private readonly ILogger<ChessableHttpService> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IVpnRotationService _vpn;
     private readonly string _curlPath;
     private readonly string? _proxyUrl;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
@@ -32,10 +33,12 @@ public class ChessableHttpService : IChessableHttpService
     public ChessableHttpService(
         ILogger<ChessableHttpService> logger,
         IServiceScopeFactory scopeFactory,
+        IVpnRotationService vpn,
         IConfiguration configuration)
     {
         _logger = logger;
         _scopeFactory = scopeFactory;
+        _vpn = vpn;
 
         // Use curl-impersonate-chrome binary directly (NOT the wrapper scripts
         // which add their own browser headers causing duplicates)
@@ -289,6 +292,11 @@ public class ChessableHttpService : IChessableHttpService
 
     private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct)
     {
+        // Vor jedem Request prüfen, ob die VPN-IP rotiert werden soll (alle N Requests).
+        // Sequentieller, awaited Loop → die Rotation liegt garantiert ZWISCHEN zwei
+        // Requests, nie mitten in einem.
+        await _vpn.MaybeRotateAsync(ct);
+
         var args = BuildGetArgs(url, bearer);
         return await RunCurlAsync(args, null, url, endpoint, chessableUid, ct);
     }

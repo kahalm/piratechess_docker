@@ -86,6 +86,15 @@ builder.Services.AddSingleton<ExportJobQueue>();
 builder.Services.AddSingleton<CourseFetchJobStore>();
 builder.Services.AddSingleton<RawCourseCache>();
 
+// Un-proxied HttpClient für den gluetun-Control-Server (:8000). Diese Calls
+// dürfen NICHT durch den :8888-Proxy laufen → UseProxy=false. Registriert
+// nebenbei IHttpClientFactory.
+builder.Services.AddHttpClient(VpnRotationService.ClientName)
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+
+// VPN-IP-Rotation (gluetun) — teilt sich denselben gluetun wie der Crawler.
+builder.Services.AddSingleton<IVpnRotationService, VpnRotationService>();
+
 // Chessable HTTP service (curl-impersonate for TLS fingerprint bypass)
 builder.Services.AddSingleton<IChessableHttpService, ChessableHttpService>();
 
