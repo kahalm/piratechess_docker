@@ -140,6 +140,11 @@ public class ChessableDirectController : ControllerBase
     /// (Kapitel/Linien) ist über <c>GET /api/chessable/direct/course/{jobId}</c> abrufbar; dort
     /// kommt bei Status "completed" auch das fertige PGN. Für Fortschrittsanzeige in rookhub.
     /// </summary>
+    /// <summary>Ob die Rohdaten dieses Kurses schon gecacht sind (→ Import braucht keinen Chessable-Abruf).</summary>
+    [HttpGet("course/{bid}/cached")]
+    public async Task<IActionResult> CourseCached(string bid, CancellationToken ct)
+        => Ok(new { cached = await _rawCache.ExistsAsync(bid, ct) });
+
     [HttpPost("course/start")]
     public IActionResult StartCourse([FromBody] DirectCourseRequest request)
     {

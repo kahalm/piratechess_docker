@@ -209,6 +209,25 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task CourseCached_MissingServiceKey_Returns401()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/chessable/direct/course/123/cached");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CourseCached_UnknownBid_ReturnsFalse()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.GetAsync("/api/chessable/direct/course/nope/cached");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CachedResp>(JsonOpts);
+        Assert.False(body!.Cached);
+    }
+
+    private record CachedResp(bool Cached);
     private record DirectTestResp(string Uid, int CourseCount);
     private record CourseItem(string Bid, string Name);
     private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);

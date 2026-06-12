@@ -47,6 +47,21 @@ public class RawCourseCache
         }
     }
 
+    /// <summary>Leichter Existenz-Check (ohne die Rohdaten zu laden/dekomprimieren).</summary>
+    public async Task<bool> ExistsAsync(string bid, CancellationToken ct = default)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            return await db.CachedRawCourses.AsNoTracking().AnyAsync(c => c.Bid == bid, ct);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public async Task SetAsync(string bid, RestResponseCourse course, CancellationToken ct = default)
     {
         try
