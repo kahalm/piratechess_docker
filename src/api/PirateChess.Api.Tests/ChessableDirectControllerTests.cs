@@ -108,6 +108,68 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // --- /api/chessable/direct/course (tiefer Kurs-Abruf für rookhub-Import) ---
+
+    [Fact]
+    public async Task Course_MissingServiceKey_Returns401()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Course_InvalidMode_Returns400()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "Nonsense" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Course_MissingBid_Returns400()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "some-valid-jwt", Bid = "", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Course_InvalidBearer_Returns400()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "not-a-real-jwt", Bid = "1001", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Course_ValidRequest_ReturnsCourseEnvelope()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        Assert.Equal("1001", body!.Bid);
+        Assert.Equal("None", body.Mode);
+        Assert.NotNull(body.Pgn);
+    }
+
     private record DirectTestResp(string Uid, int CourseCount);
     private record CourseItem(string Bid, string Name);
+    private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
 }

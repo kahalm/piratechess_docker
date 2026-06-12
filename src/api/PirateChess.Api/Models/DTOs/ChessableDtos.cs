@@ -9,6 +9,13 @@ public record CourseListItem(string Bid, string Name);
 // per request; piratechess never persists it.
 public record DirectBearerRequest(string Bearer);
 public record DirectTestResponse(string Uid, int CourseCount);
+
+// Tiefer Kurs-Abruf für den rookhub-Import. Mode steuert die Trainingsannotation im PGN:
+//   "None"         → reines Repertoire-PGN (kein Trainingszug)         → rookhub-Repertoire
+//   "FirstKeyMove" → erster Key-Zug je Linie trainierbar ([%tqu ...])  → rookhub-Buch (default)
+//   "AllKeyMoves"  → alle Key-Züge trainierbar
+public record DirectCourseRequest(string Bearer, string Bid, string? Mode);
+public record DirectCourseResponse(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
 public record StartExportRequest(string Bid, string CourseName, string TrainingMode);
 public record ExportStatusResponse(
     int Id,
