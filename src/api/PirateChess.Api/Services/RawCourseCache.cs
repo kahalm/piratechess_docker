@@ -1,3 +1,5 @@
+using System.IO.Compression;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using piratechess_lib;
@@ -11,6 +13,9 @@ namespace PirateChess.Api.Services;
 /// Der Kursinhalt ist für alle Besitzer identisch → ein zweiter User kann denselben Kurs importieren,
 /// OHNE dass Chessable erneut abgefragt wird. Überlebt Neustarts (DB). Cache-Fehler sind nie fatal
 /// (dann wird eben neu geholt).
+///
+/// Die Rohdaten können sehr groß sein (Kurse mit 36+ MB JSON) → werden gzip-komprimiert (Base64)
+/// gespeichert, damit sie unter MariaDBs max_allowed_packet bleiben.
 /// </summary>
 public class RawCourseCache
 {
@@ -32,7 +37,8 @@ public class RawCourseCache
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var row = await db.CachedRawCourses.AsNoTracking().FirstOrDefaultAsync(c => c.Bid == bid, ct);
             if (row is null || string.IsNullOrEmpty(row.RestResponseJson)) return null;
-            return JsonSerializer.Deserialize<RestResponseCourse>(row.RestResponseJson, JsonOpts);
+            var json = Decompress(row.RestResponseJson);
+            return JsonSerializer.Deserialize<RestResponseCourse>(json, JsonOpts);
         }
         catch (Exception ex)
         {
@@ -47,13 +53,13 @@ public class RawCourseCache
         {
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var json = JsonSerializer.Serialize(course);
+            var compressed = Compress(JsonSerializer.Serialize(course));
             var row = await db.CachedRawCourses.FirstOrDefaultAsync(c => c.Bid == bid, ct);
             if (row is null)
-                db.CachedRawCourses.Add(new CachedRawCourse { Bid = bid, RestResponseJson = json, CachedAt = DateTime.UtcNow });
+                db.CachedRawCourses.Add(new CachedRawCourse { Bid = bid, RestResponseJson = compressed, CachedAt = DateTime.UtcNow });
             else
             {
-                row.RestResponseJson = json;
+                row.RestResponseJson = compressed;
                 row.CachedAt = DateTime.UtcNow;
             }
             await db.SaveChangesAsync(ct);
@@ -62,5 +68,25 @@ public class RawCourseCache
         {
             _logger.LogWarning(ex, "RawCourseCache.Set fehlgeschlagen für bid {Bid}", bid);
         }
+    }
+
+    /// <summary>gzip + Base64 — schrumpft das große Kurs-JSON deutlich (gut komprimierbar).</summary>
+    private static string Compress(string text)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        using var output = new MemoryStream();
+        using (var gz = new GZipStream(output, CompressionLevel.Optimal))
+            gz.Write(bytes, 0, bytes.Length);
+        return Convert.ToBase64String(output.ToArray());
+    }
+
+    private static string Decompress(string base64)
+    {
+        var data = Convert.FromBase64String(base64);
+        using var input = new MemoryStream(data);
+        using var gz = new GZipStream(input, CompressionMode.Decompress);
+        using var output = new MemoryStream();
+        gz.CopyTo(output);
+        return Encoding.UTF8.GetString(output.ToArray());
     }
 }
