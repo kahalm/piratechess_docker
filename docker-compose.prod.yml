@@ -64,15 +64,6 @@ services:
       gluetun:
         condition: service_healthy
 
-  frontend:
-    image: ghcr.io/kahalm/piratechess-frontend:latest
-    container_name: piratechess-frontend
-    restart: unless-stopped
-    ports:
-      - "8084:80"
-    depends_on:
-      - api
-
 volumes:
   db_data:
   gluetun_data:

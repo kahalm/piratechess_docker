@@ -98,18 +98,6 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// CORS (dev)
-builder.Services.AddCors(options =>
-{
-    options.AddDefaultPolicy(policy =>
-    {
-        policy.WithOrigins("http://localhost:5173", "http://localhost:8080", "http://localhost:8084")
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
-    });
-});
-
 var app = builder.Build();
 
 // Auto-migrate on startup (skip for InMemory DB in tests)
@@ -126,7 +114,6 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseCors();
 app.UseAuthentication();
 
 // Reichert jedes Log-Event im Request mit UserId/UserName/IpAddress an (analog rookhub).

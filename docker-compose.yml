@@ -76,15 +76,6 @@ services:
       - default
       - chessable-bridge
 
-  frontend:
-    build:
-      context: .
-      dockerfile: src/frontend/Dockerfile
-    container_name: piratechess-frontend
-    restart: unless-stopped
-    depends_on:
-      - api
-
 volumes:
   db_data:
   gluetun_data:
