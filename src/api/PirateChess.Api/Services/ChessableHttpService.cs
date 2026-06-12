@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Serilog.Context;
 using piratechess_lib;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.Entities;
@@ -296,6 +297,11 @@ public class ChessableHttpService : IChessableHttpService
         // Sequentieller, awaited Loop → die Rotation liegt garantiert ZWISCHEN zwei
         // Requests, nie mitten in einem.
         await _vpn.MaybeRotateAsync(ct);
+
+        // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
+        // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).
+        var uname = ChessableJwt.TryExtractUname(bearer);
+        using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
 
         var args = BuildGetArgs(url, bearer);
         return await RunCurlAsync(args, null, url, endpoint, chessableUid, ct);

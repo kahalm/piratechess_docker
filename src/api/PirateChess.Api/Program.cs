@@ -36,6 +36,21 @@ builder.Host.UseSerilog((context, services, configuration) =>
         {
             opts.DataStream = new Elastic.Ingest.Elasticsearch.DataStreams.DataStreamName(streamName);
             opts.BootstrapMethod = Elastic.Ingest.Elasticsearch.BootstrapMethod.Silent;
+            // Bei Chessable-Requests user.name auf den echten Chessable-Username setzen
+            // (aus dem Bearer, via LogContext-Property "ChessableUser") statt des OS-Users
+            // "root", den die ECS-Sink sonst aus der Container-Umgebung einträgt.
+            opts.TextFormatting.MapCustom = (doc, logEvent) =>
+            {
+                if (logEvent.Properties.TryGetValue("ChessableUser", out var p)
+                    && p is Serilog.Events.ScalarValue { Value: string uname }
+                    && !string.IsNullOrEmpty(uname))
+                {
+                    doc.User ??= new Elastic.CommonSchema.User();
+                    doc.User.Name = uname;
+                    doc.User.Domain = null;
+                }
+                return doc;
+            };
         });
     }
 });
