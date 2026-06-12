@@ -257,6 +257,9 @@ public class ChessableHttpService : IChessableHttpService
                     }
                     else
                     {
+                        _logger.LogWarning(
+                            "Chessable line fetch gave up after 10 attempts, skipping line {LineId} (round {Round})",
+                            line.Id, round);
                         onRetry?.Invoke($"[{round}] FAILED after 10 attempts, skipping.");
                     }
                 }

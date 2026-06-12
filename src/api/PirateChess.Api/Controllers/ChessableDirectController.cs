@@ -16,10 +16,12 @@ namespace PirateChess.Api.Controllers;
 public class ChessableDirectController : ControllerBase
 {
     private readonly IChessableHttpService _chessableHttp;
+    private readonly ILogger<ChessableDirectController> _logger;
 
-    public ChessableDirectController(IChessableHttpService chessableHttp)
+    public ChessableDirectController(IChessableHttpService chessableHttp, ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
+        _logger = logger;
     }
 
     [HttpPost("test")]
@@ -90,6 +92,7 @@ public class ChessableDirectController : ControllerBase
         if (fetchError is not null)
         {
             var cleanMessage = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
+            _logger.LogWarning("Course fetch failed for bid {Bid} (uid {Uid}): {Error}", request.Bid, uid, cleanMessage);
             return BadRequest(new { message = cleanMessage });
         }
 
@@ -108,6 +111,7 @@ public class ChessableDirectController : ControllerBase
         }
         catch (Exception ex)
         {
+            _logger.LogWarning(ex, "PGN generation failed for bid {Bid} (uid {Uid})", request.Bid, uid);
             return BadRequest(new { message = $"PGN generation failed: {ex.Message}" });
         }
 
