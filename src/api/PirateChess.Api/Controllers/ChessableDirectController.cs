@@ -16,11 +16,16 @@ namespace PirateChess.Api.Controllers;
 public class ChessableDirectController : ControllerBase
 {
     private readonly IChessableHttpService _chessableHttp;
+    private readonly CourseFetchJobStore _jobStore;
     private readonly ILogger<ChessableDirectController> _logger;
 
-    public ChessableDirectController(IChessableHttpService chessableHttp, ILogger<ChessableDirectController> logger)
+    public ChessableDirectController(
+        IChessableHttpService chessableHttp,
+        CourseFetchJobStore jobStore,
+        ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
+        _jobStore = jobStore;
         _logger = logger;
     }
 
@@ -119,5 +124,103 @@ public class ChessableDirectController : ControllerBase
         var lineCount = data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0;
 
         return Ok(new DirectCourseResponse(request.Bid, courseName, mode, chapterCount, lineCount, pgn));
+    }
+
+    /// <summary>
+    /// Startet den tiefen Kurs-Abruf asynchron und liefert eine JobId. Der Fortschritt
+    /// (Kapitel/Linien) ist über <c>GET /api/chessable/direct/course/{jobId}</c> abrufbar; dort
+    /// kommt bei Status "completed" auch das fertige PGN. Für Fortschrittsanzeige in rookhub.
+    /// </summary>
+    [HttpPost("course/start")]
+    public IActionResult StartCourse([FromBody] DirectCourseRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Bearer))
+            return BadRequest(new { message = "Bearer is required" });
+        if (string.IsNullOrWhiteSpace(request.Bid))
+            return BadRequest(new { message = "Bid is required" });
+
+        var mode = string.IsNullOrWhiteSpace(request.Mode) ? "FirstKeyMove" : request.Mode;
+        string[] validModes = ["AllKeyMoves", "FirstKeyMove", "None"];
+        if (!validModes.Contains(mode))
+            return BadRequest(new { message = "Invalid mode. Use: AllKeyMoves, FirstKeyMove, None" });
+
+        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
+        if (uidError is not null)
+            return BadRequest(new { message = uidError });
+
+        var jobId = Guid.NewGuid().ToString("N");
+        _jobStore.Create(jobId);
+        // Fire-and-forget: _chessableHttp + _jobStore sind Singletons → nach Controller-Dispose gültig.
+        _ = Task.Run(() => RunFetchAsync(jobId, request.Bearer, uid, request.Bid, mode));
+        return Ok(new DirectCourseStartResponse(jobId));
+    }
+
+    /// <summary>Fortschritt/Ergebnis eines Kurs-Abruf-Jobs. Terminaler Status liefert das PGN und räumt den Job ab.</summary>
+    [HttpGet("course/{jobId}")]
+    public IActionResult CourseProgress(string jobId)
+    {
+        var job = _jobStore.Get(jobId);
+        if (job is null) return NotFound(new { message = "Job not found" });
+
+        var dto = new DirectCourseProgressResponse(
+            job.Status, job.ChaptersDone, job.ChaptersTotal, job.LinesDone,
+            job.ChapterCount, job.LineCount, job.CourseName,
+            job.Status == "completed" ? job.Pgn : null, job.Error);
+
+        if (job.Status is "completed" or "failed")
+            _jobStore.Remove(jobId); // einmaliger Terminal-Read
+
+        return Ok(dto);
+    }
+
+    private async Task RunFetchAsync(string jobId, string bearer, string uid, string bid, string mode)
+    {
+        var job = _jobStore.Get(jobId);
+        if (job is null) return;
+        try
+        {
+            var (data, fetchError) = await _chessableHttp.FetchCourseDataAsync(bearer, uid, bid,
+                onChapterProgress: counter =>
+                {
+                    var parts = counter.Split('/');
+                    if (parts.Length == 2)
+                    {
+                        if (int.TryParse(parts[0].Trim(), out var d)) job.ChaptersDone = d;
+                        if (int.TryParse(parts[1].Trim(), out var t)) job.ChaptersTotal = t;
+                    }
+                },
+                onCumulativeLines: total =>
+                {
+                    if (int.TryParse(total.Trim(), out var l)) job.LinesDone = l;
+                });
+
+            if (fetchError is not null)
+            {
+                job.Status = "failed";
+                job.Error = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
+                return;
+            }
+
+            var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
+            switch (mode)
+            {
+                case "AllKeyMoves": lib.AllKeyMovesTraining = true; lib.NoTrainingMove = false; break;
+                case "FirstKeyMove": lib.AllKeyMovesTraining = false; lib.NoTrainingMove = false; break;
+                case "None": lib.AllKeyMovesTraining = false; lib.NoTrainingMove = true; break;
+            }
+
+            var (pgn, courseName) = await Task.Run(() => lib.GetCourse(bid, useLocalData: true));
+            job.ChapterCount = data?.ChapterList.Count ?? 0;
+            job.LineCount = data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0;
+            job.CourseName = courseName;
+            job.Pgn = pgn;
+            job.Status = "completed";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Course fetch job {JobId} failed for bid {Bid}", jobId, bid);
+            job.Status = "failed";
+            job.Error = ex.Message;
+        }
     }
 }

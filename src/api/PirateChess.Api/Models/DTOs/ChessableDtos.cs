@@ -16,6 +16,20 @@ public record DirectTestResponse(string Uid, int CourseCount);
 //   "AllKeyMoves"  → alle Key-Züge trainierbar
 public record DirectCourseRequest(string Bearer, string Bid, string? Mode);
 public record DirectCourseResponse(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
+
+// Async-Variante mit Fortschritt: /course/start liefert eine JobId, /course/{jobId} pollt
+// den Fortschritt (Kapitel/Linien) und liefert bei Status "completed" das fertige Pgn.
+public record DirectCourseStartResponse(string JobId);
+public record DirectCourseProgressResponse(
+    string Status,
+    int ChaptersDone,
+    int ChaptersTotal,
+    int LinesDone,
+    int ChapterCount,
+    int LineCount,
+    string? CourseName,
+    string? Pgn,
+    string? Error);
 public record StartExportRequest(string Bid, string CourseName, string TrainingMode);
 public record ExportStatusResponse(
     int Id,

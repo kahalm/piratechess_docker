@@ -169,7 +169,48 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.NotNull(body.Pgn);
     }
 
+    // ---- /course/start + /course/{jobId} (async mit Fortschritt) ----
+
+    [Fact]
+    public async Task CourseStart_MissingServiceKey_Returns401()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
+            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CourseStart_Valid_ReturnsJobId()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
+            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JobStartResp>(JsonOpts);
+        Assert.False(string.IsNullOrWhiteSpace(body!.JobId));
+    }
+
+    [Fact]
+    public async Task CourseStart_InvalidBearer_Returns400()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
+            new { Bearer = "not-a-real-jwt", Bid = "1001", Mode = "None" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CourseProgress_UnknownJob_Returns404()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.GetAsync("/api/chessable/direct/course/doesnotexist");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     private record DirectTestResp(string Uid, int CourseCount);
     private record CourseItem(string Bid, string Name);
     private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
+    private record JobStartResp(string JobId);
 }
