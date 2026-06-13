@@ -21,7 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\..\piratechess\piratechess_lib\piratechess_lib.csproj" />
+    <ProjectReference Include="..\..\lib\piratechess_lib\piratechess_lib.csproj" />
   </ItemGroup>
 
 </Project>

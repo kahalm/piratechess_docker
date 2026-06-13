@@ -17,7 +17,7 @@ RUN dotnet restore src/api/PirateChess.Api/PirateChess.Api.csproj
 # Build
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
-COPY piratechess/piratechess_lib/ piratechess/piratechess_lib/
+COPY src/lib/piratechess_lib/ src/lib/piratechess_lib/
 COPY src/api/PirateChess.Api/ src/api/PirateChess.Api/
 RUN dotnet restore src/api/PirateChess.Api/PirateChess.Api.csproj
 RUN dotnet publish src/api/PirateChess.Api/PirateChess.Api.csproj \
