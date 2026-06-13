@@ -19,6 +19,13 @@ public class ChessableHttpService : IChessableHttpService
     private readonly string? _proxyUrl;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
+    // Der Kurs-Struktur-Abruf hatte bisher keinen Retry. Direkt nach einer VPN-
+    // Rotation liefert der gluetun-Proxy kurz 503 (CONNECT tunnel failed) → ein
+    // einziges 503 ließ den ganzen Import scheitern. Daher bounded Retry mit Pause,
+    // bis der Tunnel wieder steht.
+    private const int CourseFetchAttempts = 4;
+    private const int ProxyRetryDelayMs = 4000;
+
     // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
     private const string TlsFlags =
         "--ciphers TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256,"
@@ -153,16 +160,45 @@ public class ChessableHttpService : IChessableHttpService
         Action<string>? onRetry = null,
         CancellationToken ct = default)
     {
-        // 1. Fetch course structure
+        // 1. Fetch course structure — der gluetun-Proxy liefert direkt nach einer
+        //    VPN-Rotation kurz 503 (CONNECT tunnel failed). Anders als der Line-Fetch
+        //    hatte dieser Aufruf bisher keinen Retry → ein einziges 503 ließ den
+        //    ganzen Import mit "Empty course response" scheitern. Daher bounded Retry.
         var courseUrl = $"https://www.chessable.com/api/v1/getCourse?uid={uid}&bid={bid}";
-        string courseContent;
-        try
+        string courseContent = "";
+        for (int attempt = 0; attempt < CourseFetchAttempts; attempt++)
         {
-            courseContent = await CurlGetAsync(courseUrl, bearer, "course", uid, ct);
-        }
-        catch (Exception ex)
-        {
-            return (null, $"Failed to fetch course: {ex.Message}");
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                courseContent = await CurlGetAsync(courseUrl, bearer, "course", uid, ct);
+            }
+            catch (ProxyTunnelException ex)
+            {
+                if (attempt < CourseFetchAttempts - 1)
+                {
+                    _logger.LogWarning(
+                        "Course fetch hit proxy tunnel 503 (VPN reconnecting), retry {Attempt}/{Total}",
+                        attempt + 1, CourseFetchAttempts);
+                    await Task.Delay(ProxyRetryDelayMs, ct);
+                    continue;
+                }
+                return (null, $"Failed to fetch course (proxy tunnel unavailable): {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                return (null, $"Failed to fetch course: {ex.Message}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(courseContent) && courseContent != "{}")
+                break;
+
+            // Leerer Body ohne Exception (Proxy gab leere Antwort zurück): kurz warten, erneut.
+            if (attempt < CourseFetchAttempts - 1)
+            {
+                _logger.LogWarning("Empty course response, retry {Attempt}/{Total}", attempt + 1, CourseFetchAttempts);
+                await Task.Delay(ProxyRetryDelayMs, ct);
+            }
         }
 
         if (string.IsNullOrWhiteSpace(courseContent) || courseContent == "{}")
@@ -335,6 +371,7 @@ public class ChessableHttpService : IChessableHttpService
         string stdout = "";
         int exitCode = -1;
         string? error = null;
+        bool transientProxyFailure = false;
 
         try
         {
@@ -357,6 +394,7 @@ public class ChessableHttpService : IChessableHttpService
             {
                 _logger.LogWarning("curl exited with code {Code}: {Stderr}", exitCode, stderr);
                 error = stderr;
+                transientProxyFailure = IsTransientProxyFailure(exitCode, stderr);
             }
 
             _logger.LogInformation("curl response length: {Length}, preview: {Preview}",
@@ -373,7 +411,28 @@ public class ChessableHttpService : IChessableHttpService
             await PersistRawResponseAsync(endpoint, chessableUid, url, exitCode, stdout, (int)sw.ElapsedMilliseconds, error, ct);
         }
 
+        // Nach dem Persistieren werfen, damit der Rohlog erhalten bleibt. Der Aufrufer
+        // (Kurs-Struktur-Abruf) kann darauf gezielt einen Retry machen.
+        if (transientProxyFailure)
+            throw new ProxyTunnelException(error ?? "proxy tunnel failed (503)");
+
         return stdout;
+    }
+
+    /// <summary>
+    /// Erkennt einen transienten gluetun-Proxy-Ausfall: curl bricht mit „CONNECT
+    /// tunnel failed, response 503" ab, während die VPN-IP rotiert/reconnectet.
+    /// Solche Fehler sind nach wenigen Sekunden von selbst weg → ein Retry lohnt,
+    /// im Gegensatz zu echten Fehlern (DNS, 401, …).
+    /// </summary>
+    public static bool IsTransientProxyFailure(int exitCode, string? error)
+    {
+        if (string.IsNullOrEmpty(error))
+            return false;
+
+        return error.Contains("CONNECT tunnel failed", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("response 503", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("HTTP code 503 from proxy", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task PersistRawResponseAsync(string endpoint, string? chessableUid, string url,
