@@ -354,7 +354,7 @@ public class ChessableHttpService : IChessableHttpService
         // curl-impersonate honoriert in unserem Setup keine HTTP(S)_PROXY-Env automatisch
         // → Proxy explizit als --proxy mitgeben, damit die Calls über gluetun/VPN laufen.
         var finalArgs = string.IsNullOrEmpty(_proxyUrl) ? args : $"--proxy \"{_proxyUrl}\" {args}";
-        _logger.LogInformation("curl: {Path} (proxy: {Proxy})", _curlPath, _proxyUrl ?? "none");
+        _logger.LogDebug("curl: {Path} (proxy: {Proxy})", _curlPath, _proxyUrl ?? "none");
 
         var psi = new ProcessStartInfo
         {
@@ -397,7 +397,7 @@ public class ChessableHttpService : IChessableHttpService
                 transientProxyFailure = IsTransientProxyFailure(exitCode, stderr);
             }
 
-            _logger.LogInformation("curl response length: {Length}, preview: {Preview}",
+            _logger.LogDebug("curl response length: {Length}, preview: {Preview}",
                 stdout.Length, stdout.Length > 100 ? stdout[..100] + "..." : stdout);
         }
         catch (Exception ex)

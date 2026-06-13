@@ -20,6 +20,10 @@ builder.Host.UseSerilog((context, services, configuration) =>
         .MinimumLevel.Information()
         .MinimumLevel.Override("Microsoft.AspNetCore", LogEventLevel.Warning)
         .MinimumLevel.Override("Microsoft.EntityFrameworkCore", LogEventLevel.Warning)
+        // Pro HttpClient-Request loggt Microsoft.Extensions.Http sonst 4 INF-Zeilen
+        // (Start/Sending/Received/End) — bei IP-Rotation + publicip-Polling + Proxy-Probe
+        // ein Vielfaches pro Kursabruf. Nur noch Warnungen behalten.
+        .MinimumLevel.Override("System.Net.Http.HttpClient", LogEventLevel.Warning)
         .Enrich.FromLogContext()
         .Enrich.WithMachineName()
         .Enrich.WithProperty("Application", "PirateChess")

@@ -151,7 +151,9 @@ public class VpnRotationService : IVpnRotationService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "VPN rotation failed (non-critical)");
+            // Transiente Control-/Netzwerk-Hiccups (z.B. "response ended prematurely") sind
+            // erwartbar und werden von der nächsten Rotation aufgefangen → nur Message, kein Stacktrace.
+            _logger.LogWarning("VPN rotation failed (non-critical): {Error}", ex.Message);
             return null;
         }
         finally
@@ -196,7 +198,7 @@ public class VpnRotationService : IVpnRotationService
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "publicip query attempt {Attempt} failed", attempt + 1);
+                _logger.LogDebug("publicip query attempt {Attempt} failed: {Error}", attempt + 1, ex.Message);
             }
         }
         return null;
@@ -231,8 +233,8 @@ public class VpnRotationService : IVpnRotationService
             }
             catch (Exception ex)
             {
-                // Tunnel noch nicht bereit (503 beim CONNECT → Exception) oder Timeout.
-                _logger.LogDebug(ex, "proxy readiness probe attempt {Attempt} failed", attempt + 1);
+                // Tunnel noch nicht bereit (503 beim CONNECT → Exception) oder Timeout — erwartbar.
+                _logger.LogDebug("proxy readiness probe attempt {Attempt} failed: {Error}", attempt + 1, ex.Message);
             }
 
             if (IsProxyReady(status))
