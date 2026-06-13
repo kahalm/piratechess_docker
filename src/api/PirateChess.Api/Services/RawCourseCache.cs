@@ -62,8 +62,39 @@ public class RawCourseCache
         }
     }
 
+    /// <summary>
+    /// Ein Kurs gilt als vollständig (und damit cache-würdig), wenn er mind. ein Kapitel hat
+    /// und KEIN Kapitel/keine Linie leeren bzw. <c>{}</c>-Roh-Content trägt. Ein Teil-Fetch
+    /// (z.B. Linie nach 10 erfolglosen Retries als "" abgelegt) darf NICHT gecacht werden —
+    /// sonst vergiftet er jeden Replay: leerer Content lässt die PGN-Generierung scheitern
+    /// bzw. erzeugt lückenhafte Kurse. (Genau das war der bid-116242-Dauerfehler.)
+    /// </summary>
+    public static bool IsComplete(RestResponseCourse? course)
+    {
+        if (course?.ChapterList is null || course.ChapterList.Count == 0)
+            return false;
+        foreach (var ch in course.ChapterList)
+        {
+            if (string.IsNullOrWhiteSpace(ch.ChapterJsonContent) || ch.ChapterJsonContent == "{}")
+                return false;
+            if (ch.ResponseLineList is null)
+                continue;
+            foreach (var ln in ch.ResponseLineList)
+                if (string.IsNullOrWhiteSpace(ln.LineJsonContent) || ln.LineJsonContent == "{}")
+                    return false;
+        }
+        return true;
+    }
+
     public async Task SetAsync(string bid, RestResponseCourse course, CancellationToken ct = default)
     {
+        if (!IsComplete(course))
+        {
+            _logger.LogWarning(
+                "RawCourseCache.Set übersprungen für bid {Bid}: Kurs unvollständig (leere Kapitel/Linien) — nicht cachen, damit kein vergifteter Cache entsteht",
+                bid);
+            return;
+        }
         try
         {
             using var scope = _scopeFactory.CreateScope();
