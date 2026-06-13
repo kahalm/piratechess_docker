@@ -37,4 +37,31 @@ public class VpnRotationServiceTests
     {
         Assert.Null(VpnRotationService.ParsePublicIp(json));
     }
+
+    // --- Proxy-Readiness nach Rotation (Fix: gluetun :8888 liefert beim Reconnect kurz 503) ---
+
+    [Fact]
+    public void IsProxyReady_503_ReturnsFalse()
+    {
+        // gluetun lehnt den CONNECT-Tunnel während des Reconnects mit 503 ab → noch nicht bereit
+        Assert.False(VpnRotationService.IsProxyReady(503));
+    }
+
+    [Theory]
+    [InlineData(0)]    // Probe warf (Tunnel down / Timeout) → kein Statuscode
+    [InlineData(-1)]
+    public void IsProxyReady_NoResponse_ReturnsFalse(int status)
+    {
+        Assert.False(VpnRotationService.IsProxyReady(status));
+    }
+
+    [Theory]
+    [InlineData(200)]  // Origin durch den Tunnel erreicht
+    [InlineData(403)]  // Chessable blockt den simplen Probe-Client — Tunnel steht aber
+    [InlineData(404)]
+    [InlineData(405)]  // HEAD nicht erlaubt — Tunnel steht
+    public void IsProxyReady_GotOriginResponse_ReturnsTrue(int status)
+    {
+        Assert.True(VpnRotationService.IsProxyReady(status));
+    }
 }

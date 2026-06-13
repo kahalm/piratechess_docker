@@ -12,10 +12,14 @@ public class VpnRotationService : IVpnRotationService
     private const int RestartPauseMs = 3000;   // wie der Crawler: kurz warten zwischen stop/running
     private const int PublicIpPollAttempts = 5; // gluetun braucht nach Reconnect kurz für die neue IP
     private const int PublicIpPollDelayMs = 1000;
+    private const int ProxyReadyPollAttempts = 8;  // nach Reconnect lehnt der :8888-Tunnel kurz mit 503 ab
+    private const int ProxyReadyPollDelayMs = 1000;
+    private const int ProxyProbeTimeoutMs = 5000;
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<VpnRotationService> _logger;
     private readonly string? _controlUrl;
+    private readonly string? _proxyProbeUrl;
     private readonly int _rotateAfter;
     private readonly bool _enabled;
 
@@ -35,6 +39,12 @@ public class VpnRotationService : IVpnRotationService
         _controlUrl = configuration["Gluetun:ControlUrl"]?.TrimEnd('/');
         _rotateAfter = configuration.GetValue("Vpn:RotateAfterRequests", 20);
         if (_rotateAfter < 1) _rotateAfter = 20;
+
+        // Nach einer Rotation ist der gluetun-HTTP-Proxy (:8888) noch ein paar
+        // Sekunden nicht bereit (CONNECT → 503). Vor dem Freigeben des Gates pollen
+        // wir ihn über diesen leichten Probe-Request durch den Proxy. Leersetzen
+        // (Vpn:ProxyProbeUrl="") deaktiviert das Warten.
+        _proxyProbeUrl = configuration["Vpn:ProxyProbeUrl"] ?? "https://www.chessable.com/robots.txt";
 
         // Rotation greift nur, wenn explizit aktiviert UND ein Control-Server bekannt ist.
         _enabled = configuration.GetValue("Vpn:Enabled", true) && !string.IsNullOrEmpty(_controlUrl);
@@ -120,6 +130,10 @@ public class VpnRotationService : IVpnRotationService
                 _logger.LogInformation("VPN IP rotated → {NewIp}", newIp);
             else
                 _logger.LogInformation("VPN IP rotated (neue IP nicht ermittelbar)");
+
+            // Control-Server meldet die neue IP oft schon, während der :8888-Tunnel
+            // noch 503 liefert → erst auf Proxy-Bereitschaft warten, dann Gate frei.
+            await WaitForProxyReadyAsync(ct);
             return newIp;
         }
         catch (Exception ex)
@@ -148,6 +162,64 @@ public class VpnRotationService : IVpnRotationService
         }
         return null;
     }
+
+    /// <summary>
+    /// Pollt nach einer Rotation den gluetun-HTTP-Proxy (:8888) über einen leichten
+    /// Probe-Request DURCH den Proxy, bis der CONNECT-Tunnel wieder steht
+    /// (Antwort ≠ 503). gluetun lehnt während des Reconnects mit 503 ab — der
+    /// unmittelbar folgende Chessable-Request käme sonst mit „CONNECT tunnel failed,
+    /// response 503" leer zurück. Best-effort: gibt nach
+    /// <see cref="ProxyReadyPollAttempts"/> Versuchen auf und fährt fort.
+    /// </summary>
+    private async Task WaitForProxyReadyAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_proxyProbeUrl))
+            return;
+
+        // Der "Chessable"-Client ist auf den gluetun-Proxy (:8888) verdrahtet.
+        var client = _httpClientFactory.CreateClient(ChessableHttpClientFactory.ClientName);
+
+        for (int attempt = 0; attempt < ProxyReadyPollAttempts; attempt++)
+        {
+            int status = 0;
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(ProxyProbeTimeoutMs);
+                using var req = new HttpRequestMessage(HttpMethod.Head, _proxyProbeUrl);
+                using var resp = await client.SendAsync(req, timeoutCts.Token);
+                status = (int)resp.StatusCode;
+            }
+            catch (Exception ex)
+            {
+                // Tunnel noch nicht bereit (503 beim CONNECT → Exception) oder Timeout.
+                _logger.LogDebug(ex, "proxy readiness probe attempt {Attempt} failed", attempt + 1);
+            }
+
+            if (IsProxyReady(status))
+            {
+                _logger.LogInformation(
+                    "Proxy tunnel ready after rotation (probe status {Status}, attempt {Attempt})",
+                    status, attempt + 1);
+                return;
+            }
+
+            await Task.Delay(ProxyReadyPollDelayMs, ct);
+        }
+
+        _logger.LogWarning(
+            "Proxy tunnel not confirmed ready after {Attempts} attempts post-rotation — proceeding anyway",
+            ProxyReadyPollAttempts);
+    }
+
+    /// <summary>
+    /// Entscheidet anhand des HTTP-Statuscodes eines Probe-Requests, ob der gluetun-
+    /// Proxy-Tunnel bereit ist. 0 = Request warf (Tunnel down / Timeout) → nicht bereit;
+    /// 503 = gluetun lehnt CONNECT während des Reconnects ab → nicht bereit; alles
+    /// andere (200/403/404/405 …) = Origin durch den Tunnel erreicht → bereit.
+    /// </summary>
+    public static bool IsProxyReady(int httpStatusCode)
+        => httpStatusCode > 0 && httpStatusCode != 503;
 
     /// <summary>Extrahiert <c>public_ip</c> aus der gluetun-Antwort von <c>/v1/publicip/ip</c>.</summary>
     public static string? ParsePublicIp(string json)
