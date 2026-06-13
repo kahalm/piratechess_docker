@@ -9,7 +9,7 @@ public class VpnRotationService : IVpnRotationService
     /// <summary>Name des un-proxied HttpClients (Control-Calls dürfen NICHT durch :8888 laufen).</summary>
     public const string ClientName = "GluetunControl";
 
-    private const int RestartPauseMs = 3000;   // wie der Crawler: kurz warten zwischen stop/running
+    private const int DefaultRestartPauseMs = 3000; // wie der Crawler: kurz warten zwischen stop/running
     private const int PublicIpPollAttempts = 5; // gluetun braucht nach Reconnect kurz für die neue IP
     private const int PublicIpPollDelayMs = 1000;
     private const int ProxyReadyPollAttempts = 8;  // nach Reconnect lehnt der :8888-Tunnel kurz mit 503 ab
@@ -21,6 +21,7 @@ public class VpnRotationService : IVpnRotationService
     private readonly string? _controlUrl;
     private readonly string? _proxyProbeUrl;
     private readonly int _rotateAfter;
+    private readonly int _restartPauseMs;
     private readonly bool _enabled;
 
     // Serialisiert Zähler UND Rotation: keine zwei Rotationen gleichzeitig, und
@@ -39,6 +40,9 @@ public class VpnRotationService : IVpnRotationService
         _controlUrl = configuration["Gluetun:ControlUrl"]?.TrimEnd('/');
         _rotateAfter = configuration.GetValue("Vpn:RotateAfterRequests", 20);
         if (_rotateAfter < 1) _rotateAfter = 20;
+
+        _restartPauseMs = configuration.GetValue("Vpn:RestartPauseMs", DefaultRestartPauseMs);
+        if (_restartPauseMs < 0) _restartPauseMs = DefaultRestartPauseMs;
 
         // Nach einer Rotation ist der gluetun-HTTP-Proxy (:8888) noch ein paar
         // Sekunden nicht bereit (CONNECT → 503). Vor dem Freigeben des Gates pollen
@@ -114,16 +118,25 @@ public class VpnRotationService : IVpnRotationService
         var client = _httpClientFactory.CreateClient(ClientName);
         var statusUrl = $"{_controlUrl}/v1/vpn/status";
 
+        // Sobald wir den Stop ANSTOSSEN, sind wir dafür verantwortlich, den VPN
+        // wieder hochzufahren. Wird die Rotation im Fenster zwischen stop und
+        // bestätigtem start abgebrochen (CancellationToken) oder scheitert die
+        // start-PUT, bliebe gluetun sonst dauerhaft "stopped" liegen (→ :8888
+        // liefert 503 für ALLE Requests). Das finally erzwingt dann den Neustart.
+        bool needsRestart = false;
+
         try
         {
             _logger.LogInformation("Rotating VPN IP...");
+            needsRestart = true;
             using (var stop = new StringContent("""{"status":"stopped"}""", Encoding.UTF8, "application/json"))
                 (await client.PutAsync(statusUrl, stop, ct)).EnsureSuccessStatusCode();
 
-            await Task.Delay(RestartPauseMs, ct);
+            await Task.Delay(_restartPauseMs, ct);
 
             using (var start = new StringContent("""{"status":"running"}""", Encoding.UTF8, "application/json"))
                 (await client.PutAsync(statusUrl, start, ct)).EnsureSuccessStatusCode();
+            needsRestart = false; // Start bestätigt → kein Recovery nötig
 
             var newIp = await PollPublicIpAsync(client, ct);
             if (newIp is not null)
@@ -140,6 +153,32 @@ public class VpnRotationService : IVpnRotationService
         {
             _logger.LogWarning(ex, "VPN rotation failed (non-critical)");
             return null;
+        }
+        finally
+        {
+            if (needsRestart)
+                await EnsureVpnRunningAsync(client, statusUrl);
+        }
+    }
+
+    /// <summary>
+    /// Sicherheitsnetz: fährt den VPN wieder hoch, wenn eine Rotation nach dem Stop
+    /// nicht durch ein bestätigtes Start abgelöst wurde. Nutzt bewusst KEIN
+    /// CancellationToken — der Restart muss auch nach einer Cancellation noch
+    /// durchgehen, sonst bleibt der gluetun-Tunnel "stopped" liegen.
+    /// </summary>
+    private async Task EnsureVpnRunningAsync(HttpClient client, string statusUrl)
+    {
+        try
+        {
+            _logger.LogWarning(
+                "VPN rotation incomplete (stopped, start not confirmed) → forcing VPN restart");
+            using var start = new StringContent("""{"status":"running"}""", Encoding.UTF8, "application/json");
+            (await client.PutAsync(statusUrl, start)).EnsureSuccessStatusCode();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VPN recovery restart failed — tunnel may stay stopped");
         }
     }
 
