@@ -26,6 +26,12 @@ public class ChessableHttpService : IChessableHttpService
     private const int CourseFetchAttempts = 4;
     private const int ProxyRetryDelayMs = 4000;
 
+    // Zufälliger Abstand zwischen zwei aufeinanderfolgenden Zeilen-/Kapitel-Requests
+    // (menschenähnliches Timing → senkt Chessables Block-Rate). Höher = weniger
+    // Blocks, aber längere Kursdauer.
+    private const int InterRequestDelayMinMs = 2000;
+    private const int InterRequestDelayMaxMs = 5000;
+
     // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
     private const string TlsFlags =
         "--ciphers TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256,"
@@ -314,14 +320,14 @@ public class ChessableHttpService : IChessableHttpService
 
                 // Random delay between line requests
                 if (lineIdx < responseChapter.List.Data.Count - 1)
-                    await Task.Delay(Random.Shared.Next(500, 1500), ct);
+                    await Task.Delay(Random.Shared.Next(InterRequestDelayMinMs, InterRequestDelayMaxMs), ct);
             }
 
             restResponseCourse.ChapterList.Add(restResponseChapter);
 
             // Random delay between chapter requests
             if (chapterIdx < course.Course.Data.Count - 1)
-                await Task.Delay(Random.Shared.Next(500, 1500), ct);
+                await Task.Delay(Random.Shared.Next(InterRequestDelayMinMs, InterRequestDelayMaxMs), ct);
         }
 
         return (restResponseCourse, null);
