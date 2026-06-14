@@ -148,6 +148,75 @@ public class VpnRotationServiceTests
         Assert.Equal(1, runningCount);
     }
 
+    [Fact]
+    public async Task Rotation_StartHitsStalePooledConnection_RetriesWithoutForcingRecovery()
+    {
+        // Regression: Nach der stop→Pause→start-Sequenz schließt gluetun die
+        // serverseitige Keep-Alive-Verbindung. .NET griff die tote gepoolte
+        // Verbindung beim start-PUT wieder auf → "Connection reset by peer", was als
+        // Warn-Paar (rotation failed + forcing restart) geloggt wurde. Der interne
+        // Retry muss den Reset abfangen und den Start frisch wiederholen, OHNE den
+        // catch/Recovery-finally-Pfad auszulösen.
+        var runningCount = 0;
+        var publicIpQueried = false;
+
+        var handler = new StubHandler(async req =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+
+            // Der publicip-Poll wird NUR auf dem Erfolgspfad erreicht (nach bestätigtem Start).
+            if (req.RequestUri!.AbsolutePath.Contains("publicip"))
+            {
+                publicIpQueried = true;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("""{"public_ip":"1.2.3.4"}""") };
+            }
+
+            if (body.Contains("running"))
+            {
+                // Erster Start trifft die tote gepoolte Verbindung: Transport-Reset
+                // (HttpRequestException OHNE StatusCode), KEIN HTTP-Fehlerstatus.
+                if (Interlocked.Increment(ref runningCount) == 1)
+                    throw new HttpRequestException("Connection reset by peer");
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+
+        var svc = BuildService(handler);
+        await svc.RotateNowAsync(CancellationToken.None);
+
+        // Genau 2 running-PUTs: 1× Reset + 1× frischer Retry — kein dritter aus dem finally.
+        Assert.Equal(2, runningCount);
+        // Rotation lief auf dem Erfolgspfad weiter (publicip gepollt) → der Reset wurde
+        // intern aufgefangen, nicht bis ins catch/Recovery-finally durchgereicht.
+        Assert.True(publicIpQueried,
+            "publicip should be polled → rotation stayed on success path via retry");
+    }
+
+    [Fact]
+    public async Task Rotation_StartReturnsErrorStatus_StillTriggersRecoveryRestart_NotSwallowedByRetry()
+    {
+        // Abgrenzung zum Retry: Ein HTTP-Fehlerstatus (StatusCode gesetzt) ist KEIN
+        // Transport-Reset und darf NICHT vom Retry geschluckt werden — er muss wie
+        // bisher ins Recovery-finally durchschlagen.
+        var runningCount = 0;
+
+        var handler = new StubHandler(async req =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+            await Task.CompletedTask;
+            if (body.Contains("running") && Interlocked.Increment(ref runningCount) == 1)
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable); // 503, kein Reset
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+
+        var svc = BuildService(handler);
+        await svc.RotateNowAsync(CancellationToken.None);
+
+        // 1× regulärer Start (503, propagiert) + 1× Recovery-Start im finally.
+        Assert.True(runningCount >= 2, $"expected recovery restart, running PUTs={runningCount}");
+    }
+
     private static VpnRotationService BuildService(HttpMessageHandler handler)
     {
         var config = new ConfigurationBuilder()

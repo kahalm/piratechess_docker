@@ -129,13 +129,11 @@ public class VpnRotationService : IVpnRotationService
         {
             _logger.LogInformation("Rotating VPN IP...");
             needsRestart = true;
-            using (var stop = new StringContent("""{"status":"stopped"}""", Encoding.UTF8, "application/json"))
-                (await client.PutAsync(statusUrl, stop, ct)).EnsureSuccessStatusCode();
+            await PutVpnStatusAsync(client, statusUrl, """{"status":"stopped"}""", ct);
 
             await Task.Delay(_restartPauseMs, ct);
 
-            using (var start = new StringContent("""{"status":"running"}""", Encoding.UTF8, "application/json"))
-                (await client.PutAsync(statusUrl, start, ct)).EnsureSuccessStatusCode();
+            await PutVpnStatusAsync(client, statusUrl, """{"status":"running"}""", ct);
             needsRestart = false; // Start bestätigt → kein Recovery nötig
 
             var newIp = await PollPublicIpAsync(client, ct);
@@ -164,6 +162,36 @@ public class VpnRotationService : IVpnRotationService
     }
 
     /// <summary>
+    /// Setzt den gluetun-VPN-Status (stopped/running) per Control-PUT — mit genau
+    /// EINEM Retry bei Transport-Fehlern. Eine Rotation macht stop → Pause
+    /// (<see cref="_restartPauseMs"/>, ~3s) → start; in dieser Pause schließt gluetun
+    /// die serverseitige Keep-Alive-Verbindung. .NET greift die tote gepoolte
+    /// Verbindung beim start-PUT sonst wieder auf → "Connection reset by peer"
+    /// (HttpRequestException OHNE StatusCode). Der zweite Versuch öffnet eine
+    /// frische Verbindung. Ein HTTP-Fehlerstatus (z.B. 503) hat einen StatusCode
+    /// und wird NICHT geschluckt — der propagiert wie bisher und löst im Aufrufer
+    /// das Recovery-finally aus.
+    /// </summary>
+    private static async Task PutVpnStatusAsync(
+        HttpClient client, string statusUrl, string json, CancellationToken ct)
+    {
+        const int maxAttempts = 2;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var body = new StringContent(json, Encoding.UTF8, "application/json");
+                (await client.PutAsync(statusUrl, body, ct)).EnsureSuccessStatusCode();
+                return;
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode is null && attempt < maxAttempts)
+            {
+                // Tote gepoolte Verbindung (Reset) → frischer Versuch öffnet eine neue Verbindung.
+            }
+        }
+    }
+
+    /// <summary>
     /// Sicherheitsnetz: fährt den VPN wieder hoch, wenn eine Rotation nach dem Stop
     /// nicht durch ein bestätigtes Start abgelöst wurde. Nutzt bewusst KEIN
     /// CancellationToken — der Restart muss auch nach einer Cancellation noch
@@ -175,8 +203,7 @@ public class VpnRotationService : IVpnRotationService
         {
             _logger.LogWarning(
                 "VPN rotation incomplete (stopped, start not confirmed) → forcing VPN restart");
-            using var start = new StringContent("""{"status":"running"}""", Encoding.UTF8, "application/json");
-            (await client.PutAsync(statusUrl, start)).EnsureSuccessStatusCode();
+            await PutVpnStatusAsync(client, statusUrl, """{"status":"running"}""", CancellationToken.None);
         }
         catch (Exception ex)
         {

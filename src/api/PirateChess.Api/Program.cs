@@ -108,8 +108,19 @@ builder.Services.AddSingleton<RawCourseCache>();
 // Un-proxied HttpClient für den gluetun-Control-Server (:8000). Diese Calls
 // dürfen NICHT durch den :8888-Proxy laufen → UseProxy=false. Registriert
 // nebenbei IHttpClientFactory.
+//
+// PooledConnectionIdleTimeout bewusst kurz (< Vpn:RestartPauseMs): Eine Rotation
+// macht stop-PUT → Pause (~3s, gluetun setzt sein Netz neu auf) → start-PUT. In
+// dieser Pause schließt gluetun die serverseitige Keep-Alive-Verbindung. Mit dem
+// .NET-Default (1 min) griffe der start-PUT die tote gepoolte Verbindung wieder
+// auf → "Connection reset by peer". Mit kurzem Idle-Timeout verwirft .NET die
+// inaktive Verbindung und öffnet für den start-PUT eine frische.
 builder.Services.AddHttpClient(VpnRotationService.ClientName)
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        UseProxy = false,
+        PooledConnectionIdleTimeout = TimeSpan.FromSeconds(1),
+    });
 
 // VPN-IP-Rotation (gluetun) — teilt sich denselben gluetun wie der Crawler.
 builder.Services.AddSingleton<IVpnRotationService, VpnRotationService>();
