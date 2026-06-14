@@ -1,6 +1,16 @@
 # gluetun Control-Server-Auth — gibt die IP-Rotations-Routen frei.
-# Control-Port nur intern erreichbar (FIREWALL_INPUT_PORTS). Haertung auf API-Key: siehe rookhub/TODO.md.
+# Control-Port nur intern erreichbar (FIREWALL_INPUT_PORTS), zusätzlich auf API-Key gehärtet.
+#
+# AKTIVIERUNG (pro Stack, NICHT im Repo-Template — hier steht nur ein Platzhalter):
+#   1. In /opt/stacks/rookhub-schach{,-dev}/gluetun-auth.toml den `apikey` auf den echten
+#      Secret setzen (= GLUETUN_APIKEY aus der jeweiligen .env).
+#   2. piratechess-api bekommt denselben Secret als `Gluetun__ApiKey`-Env (aus der .env) →
+#      VpnRotationService schickt ihn als X-API-Key (siehe Program.cs).
+#   3. gluetun + piratechess-api ZUSAMMEN neu starten (sonst Mismatch → Rotation bricht).
+# Der Code ist rückwärtskompatibel: ohne gesetzten Key sendet piratechess keinen Header und
+# auth="none" funktioniert weiter — die Umstellung kann also kontrolliert erfolgen.
 [[roles]]
 name = "rotation"
 routes = ["GET /v1/publicip/ip", "GET /v1/vpn/status", "PUT /v1/vpn/status"]
-auth = "none"
+auth = "apikey"
+apikey = "CHANGE_ME"

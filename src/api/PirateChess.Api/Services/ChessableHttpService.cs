@@ -52,6 +52,10 @@ public class ChessableHttpService : IChessableHttpService
         + " --tlsv1.2 --alps --tls-permute-extensions"
         + " --cert-compression brotli";
 
+    // Dieselben TLS-Flags als einzelne argv-Tokens (kein Token enthält Leerzeichen → split by space).
+    // Werden über ProcessStartInfo.ArgumentList übergeben, nicht als ein String → keine Arg-Injektion.
+    private static readonly string[] TlsArgs = TlsFlags.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
     public ChessableHttpService(
         ILogger<ChessableHttpService> logger,
         IServiceScopeFactory scopeFactory,
@@ -399,23 +403,29 @@ public class ChessableHttpService : IChessableHttpService
         return await RunCurlAsync(args, body, url, endpoint, chessableUid, ct);
     }
 
-    private async Task<string> RunCurlAsync(string args, string? stdinBody, string url, string endpoint, string? chessableUid, CancellationToken ct)
+    private async Task<string> RunCurlAsync(List<string> args, string? stdinBody, string url, string endpoint, string? chessableUid, CancellationToken ct)
     {
-        // curl-impersonate honoriert in unserem Setup keine HTTP(S)_PROXY-Env automatisch
-        // → Proxy explizit als --proxy mitgeben, damit die Calls über gluetun/VPN laufen.
-        var finalArgs = string.IsNullOrEmpty(_proxyUrl) ? args : $"--proxy \"{_proxyUrl}\" {args}";
         _logger.LogDebug("curl: {Path} (proxy: {Proxy})", _curlPath, _proxyUrl ?? "none");
 
         var psi = new ProcessStartInfo
         {
             FileName = _curlPath,
-            Arguments = finalArgs,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             RedirectStandardInput = stdinBody is not null,
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        // ArgumentList → jedes Token wird einzeln/escaped übergeben (keine Shell, keine Arg-Injektion).
+        // curl-impersonate honoriert in unserem Setup keine HTTP(S)_PROXY-Env automatisch
+        // → Proxy explizit als --proxy mitgeben, damit die Calls über gluetun/VPN laufen.
+        if (!string.IsNullOrEmpty(_proxyUrl))
+        {
+            psi.ArgumentList.Add("--proxy");
+            psi.ArgumentList.Add(_proxyUrl);
+        }
+        foreach (var arg in args)
+            psi.ArgumentList.Add(arg);
 
         var sw = Stopwatch.StartNew();
         string stdout = "";
@@ -550,56 +560,71 @@ public class ChessableHttpService : IChessableHttpService
         }
     }
 
-    private static string BuildGetArgs(string url, string bearer)
+    private static void AddHeader(List<string> args, string header)
     {
-        var sb = new StringBuilder();
-        sb.Append($"-s -S {TlsFlags}");
-        sb.Append($" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0\"");
-        sb.Append($" -H \"accept: application/json, text/plain, */*\"");
-        sb.Append($" -H \"accept-language: en\"");
-        sb.Append($" -H \"platform: Web\"");
-        sb.Append($" -H \"x-os-name: Firefox\"");
-        sb.Append($" -H \"x-os-version: 138\"");
-        sb.Append($" -H \"x-device-model: Windows\"");
-        sb.Append($" -H \"authorization: Bearer {bearer}\"");
-        sb.Append($" -H \"alt-used: www.chessable.com\"");
-        sb.Append($" -H \"connection: keep-alive\"");
-        sb.Append($" -H \"sec-fetch-dest: empty\"");
-        sb.Append($" -H \"sec-fetch-mode: cors\"");
-        sb.Append($" -H \"sec-fetch-site: same-origin\"");
-        sb.Append($" -H \"priority: u=0\"");
-        sb.Append($" -H \"te: trailers\"");
-        sb.Append($" -H \"pragma: no-cache\"");
-        sb.Append($" -H \"cache-control: no-cache\"");
-        sb.Append($" \"{url}\"");
-        return sb.ToString();
+        args.Add("-H");
+        args.Add(header);
     }
 
-    private static string BuildPostArgs(string url)
+    /// <summary>
+    /// Baut die curl-Argumente als EINZELNE argv-Tokens (für <see cref="ProcessStartInfo.ArgumentList"/>).
+    /// Jeder Wert — inkl. URL (mit user-naher bid) und Bearer — ist ein eigenständiges Argument; .NET
+    /// escaped sie pro-Token. Dadurch kann KEIN Eingabewert curl-Flags injizieren (vorher floss die URL
+    /// als <c>"{url}"</c> in einen Args-String → ein <c>"</c> in der bid konnte z.B. <c>-o</c>/<c>--config</c>
+    /// einschleusen und Dateien lesen/schreiben).
+    /// </summary>
+    public static List<string> BuildGetArgs(string url, string bearer)
     {
-        var sb = new StringBuilder();
-        sb.Append($"-s -S {TlsFlags} -X POST");
-        sb.Append($" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0\"");
-        sb.Append($" -H \"accept: application/json, text/plain, */*\"");
-        sb.Append($" -H \"accept-language: en\"");
-        sb.Append($" -H \"referer: https://www.chessable.com/login/\"");
-        sb.Append($" -H \"content-type: application/json;charset=utf-8\"");
-        sb.Append($" -H \"platform: Web\"");
-        sb.Append($" -H \"x-os-name: Firefox\"");
-        sb.Append($" -H \"x-os-version: 137\"");
-        sb.Append($" -H \"x-device-model: Windows\"");
-        sb.Append($" -H \"origin: https://www.chessable.com\"");
-        sb.Append($" -H \"alt-used: www.chessable.com\"");
-        sb.Append($" -H \"connection: keep-alive\"");
-        sb.Append($" -H \"sec-fetch-dest: empty\"");
-        sb.Append($" -H \"sec-fetch-mode: cors\"");
-        sb.Append($" -H \"sec-fetch-site: same-origin\"");
-        sb.Append($" -H \"dnt: 1\"");
-        sb.Append($" -H \"sec-gpc: 1\"");
-        sb.Append($" -H \"priority: u=0\"");
-        sb.Append(" -d @-"); // read body from stdin
-        sb.Append($" \"{url}\"");
-        return sb.ToString();
+        var args = new List<string> { "-s", "-S" };
+        args.AddRange(TlsArgs);
+        AddHeader(args, "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0");
+        AddHeader(args, "accept: application/json, text/plain, */*");
+        AddHeader(args, "accept-language: en");
+        AddHeader(args, "platform: Web");
+        AddHeader(args, "x-os-name: Firefox");
+        AddHeader(args, "x-os-version: 138");
+        AddHeader(args, "x-device-model: Windows");
+        AddHeader(args, $"authorization: Bearer {bearer}");
+        AddHeader(args, "alt-used: www.chessable.com");
+        AddHeader(args, "connection: keep-alive");
+        AddHeader(args, "sec-fetch-dest: empty");
+        AddHeader(args, "sec-fetch-mode: cors");
+        AddHeader(args, "sec-fetch-site: same-origin");
+        AddHeader(args, "priority: u=0");
+        AddHeader(args, "te: trailers");
+        AddHeader(args, "pragma: no-cache");
+        AddHeader(args, "cache-control: no-cache");
+        args.Add(url);
+        return args;
+    }
+
+    /// <summary>Wie <see cref="BuildGetArgs"/>, für POST (Body via stdin, <c>-d @-</c>).</summary>
+    public static List<string> BuildPostArgs(string url)
+    {
+        var args = new List<string> { "-s", "-S" };
+        args.AddRange(TlsArgs);
+        args.Add("-X"); args.Add("POST");
+        AddHeader(args, "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0");
+        AddHeader(args, "accept: application/json, text/plain, */*");
+        AddHeader(args, "accept-language: en");
+        AddHeader(args, "referer: https://www.chessable.com/login/");
+        AddHeader(args, "content-type: application/json;charset=utf-8");
+        AddHeader(args, "platform: Web");
+        AddHeader(args, "x-os-name: Firefox");
+        AddHeader(args, "x-os-version: 137");
+        AddHeader(args, "x-device-model: Windows");
+        AddHeader(args, "origin: https://www.chessable.com");
+        AddHeader(args, "alt-used: www.chessable.com");
+        AddHeader(args, "connection: keep-alive");
+        AddHeader(args, "sec-fetch-dest: empty");
+        AddHeader(args, "sec-fetch-mode: cors");
+        AddHeader(args, "sec-fetch-site: same-origin");
+        AddHeader(args, "dnt: 1");
+        AddHeader(args, "sec-gpc: 1");
+        AddHeader(args, "priority: u=0");
+        args.Add("-d"); args.Add("@-"); // read body from stdin
+        args.Add(url);
+        return args;
     }
 
     private static string ComputeSha512Hash(string input)

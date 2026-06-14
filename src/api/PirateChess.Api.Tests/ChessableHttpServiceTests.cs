@@ -39,4 +39,42 @@ public class ChessableHttpServiceTests
     {
         Assert.False(ChessableHttpService.IsTransientProxyFailure(exitCode, stderr));
     }
+
+    // --- curl-Arg-Injektion (Fix HIGH: bid/url floss vorher als "{url}" in einen Args-String) ---
+
+    [Fact]
+    public void BuildGetArgs_MaliciousUrl_StaysSingleArgument_NoInjectedFlags()
+    {
+        // Eine bid mit  " -o /tmp/pwn --config /etc/passwd  hätte vorher curl-Flags eingeschleust
+        // (Datei schreiben/lesen). Als ArgumentList-Token ist die KOMPLETTE URL genau ein Argument.
+        var evil = "https://www.chessable.com/api/v1/getCourse?uid=1&bid=1\" -o /tmp/pwn --config /etc/passwd";
+        var args = ChessableHttpService.BuildGetArgs(evil, "tok");
+
+        Assert.Equal(evil, args[^1]);                       // ganze bösartige URL = genau ein, letztes Token
+        Assert.Single(args, a => a == evil);
+        Assert.DoesNotContain("-o", args);                  // kein eingeschleustes Flag als eigenes argv-Token
+        Assert.DoesNotContain("--config", args);
+        Assert.DoesNotContain("/tmp/pwn", args);
+    }
+
+    [Fact]
+    public void BuildGetArgs_BearerAndUrl_AreDistinctSingleTokens()
+    {
+        var args = ChessableHttpService.BuildGetArgs("https://x/y", "my.jwt.token");
+        Assert.Equal("-s", args[0]);
+        Assert.Contains("-H", args);
+        Assert.Contains("authorization: Bearer my.jwt.token", args); // Header-Wert = ein Token (mit Leerzeichen)
+        Assert.Equal("https://x/y", args[^1]);                       // URL zuletzt, ein Token
+    }
+
+    [Fact]
+    public void BuildPostArgs_PostWithStdinBody_AndUrlLast()
+    {
+        var args = ChessableHttpService.BuildPostArgs("https://www.chessable.com/api/v1/authenticate");
+        Assert.Contains("-X", args);
+        Assert.Contains("POST", args);
+        Assert.Contains("-d", args);
+        Assert.Contains("@-", args);                                  // Body aus stdin
+        Assert.Equal("https://www.chessable.com/api/v1/authenticate", args[^1]);
+    }
 }

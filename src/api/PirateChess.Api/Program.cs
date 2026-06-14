@@ -116,7 +116,16 @@ builder.Services.AddSingleton<RawLineCache>();
 // .NET-Default (1 min) griffe der start-PUT die tote gepoolte Verbindung wieder
 // auf → "Connection reset by peer". Mit kurzem Idle-Timeout verwirft .NET die
 // inaktive Verbindung und öffnet für den start-PUT eine frische.
-builder.Services.AddHttpClient(VpnRotationService.ClientName)
+builder.Services.AddHttpClient(VpnRotationService.ClientName, client =>
+    {
+        // gluetun-Control-Server härten: ist ein API-Key gesetzt (Gluetun:ApiKey, aus der .env),
+        // wird er als X-API-Key mitgeschickt → gluetun-auth.toml kann von auth="none" auf
+        // auth="apikey" umgestellt werden. Ohne Key (leer) bleibt das Verhalten wie bisher
+        // (rückwärtskompatibel) → Code kann deployt werden, bevor der Key auf beiden Seiten aktiv ist.
+        var apiKey = builder.Configuration["Gluetun:ApiKey"];
+        if (!string.IsNullOrEmpty(apiKey))
+            client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+    })
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
     {
         UseProxy = false,
