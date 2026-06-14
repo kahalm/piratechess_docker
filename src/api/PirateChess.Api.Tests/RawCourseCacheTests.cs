@@ -1,8 +1,10 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using piratechess_lib;
 using PirateChess.Api.Data;
+using PirateChess.Api.Models.Entities;
 using PirateChess.Api.Services;
 
 namespace PirateChess.Api.Tests;
@@ -98,5 +100,81 @@ public class RawCourseCacheTests
         await cache.SetAsync("bidX", poisoned);
 
         Assert.Null(await cache.GetAsync("bidX")); // wurde NICHT gecacht
+    }
+
+    // --- Truncation-Härtung (prod): abgeschnittenes (nicht-leeres) Kapitel-JSON ---
+
+    [Fact]
+    public void IsComplete_TruncatedChapterContent_False()
+    {
+        var c = Complete("{}");
+        // Gültiger Anfang, mitten im data-Array abgeschnitten (≈ der ~8 KB-Proxy-Cut, der
+        // "Path: $.list.data[9] ... reached end of data" auslöste). Nicht-leer → rutschte
+        // früher durch die reine Leer-Prüfung.
+        c.ChapterList[0].ChapterJsonContent = "{\"list\":{\"name\":\"Ch1\",\"data\":[{\"id\":10},{\"id\":11,\"na";
+        Assert.False(RawCourseCache.IsComplete(c));
+    }
+
+    [Fact]
+    public void IsComplete_TruncatedLineContent_False()
+    {
+        var c = Complete("{}");
+        c.ChapterList[0].ResponseLineList[0].LineJsonContent = "{\"game\":{\"moves\":[{\"san\":\"e4\""; // abgeschnitten
+        Assert.False(RawCourseCache.IsComplete(c));
+    }
+
+    [Fact]
+    public void IsComplete_EmptyButValidChapter_True()
+    {
+        // Ein legitim leeres Kapitel (parsbares JSON, leeres data-Array) ist KEIN Defekt.
+        var c = Complete("{}");
+        c.ChapterList[0].ChapterJsonContent = "{\"list\":{\"data\":[]}}";
+        Assert.True(RawCourseCache.IsComplete(c));
+    }
+
+    // Selbstheilung: ein bereits (vor der Härtung) truncated gecachter Kurs wird beim Lesen
+    // erkannt, gelöscht und als Cache-Miss gemeldet → der laufende Import zieht sofort frisch.
+    [Fact]
+    public async Task GetAsync_TruncatedCachedCourse_DeletedAndReturnsNull()
+    {
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sp = services.BuildServiceProvider();
+        var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+        var cache = new RawCourseCache(scopeFactory, NullLogger<RawCourseCache>.Instance);
+
+        // Vergifteten (truncated) Kurs direkt in die DB legen — SetAsync würde ihn ablehnen.
+        var poisoned = Complete("{}");
+        poisoned.ChapterList[0].ChapterJsonContent = "{\"list\":{\"data\":[{\"id\":1},{\"id";
+        using (var scope = scopeFactory.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.CachedRawCourses.Add(new CachedRawCourse
+            {
+                Bid = "poison",
+                RestResponseJson = GzipBase64(JsonSerializer.Serialize(poisoned)),
+                CachedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Null(await cache.GetAsync("poison")); // korrupt erkannt → Cache-Miss
+
+        using (var scope = scopeFactory.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            Assert.False(await db.CachedRawCourses.AnyAsync(c => c.Bid == "poison")); // gelöscht
+        }
+    }
+
+    // gzip+Base64 wie RawCourseCache.Compress (privat) — für das direkte Seeden eines Roh-Eintrags.
+    private static string GzipBase64(string text)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        using var output = new MemoryStream();
+        using (var gz = new System.IO.Compression.GZipStream(output, System.IO.Compression.CompressionLevel.Optimal))
+            gz.Write(bytes, 0, bytes.Length);
+        return Convert.ToBase64String(output.ToArray());
     }
 }

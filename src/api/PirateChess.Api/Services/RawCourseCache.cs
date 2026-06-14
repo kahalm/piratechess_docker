@@ -38,7 +38,26 @@ public class RawCourseCache
             var row = await db.CachedRawCourses.AsNoTracking().FirstOrDefaultAsync(c => c.Bid == bid, ct);
             if (row is null || string.IsNullOrEmpty(row.RestResponseJson)) return null;
             var json = Decompress(row.RestResponseJson);
-            return JsonSerializer.Deserialize<RestResponseCourse>(json, JsonOpts);
+            var course = JsonSerializer.Deserialize<RestResponseCourse>(json, JsonOpts);
+
+            // Selbstheilung: ein (vor dieser Härtung) truncated gecachter Kurs würde sonst jeden
+            // Import erneut crashen lassen. Beim Lesen prüfen und einen korrupten Eintrag SOFORT
+            // löschen + null liefern → der laufende Import sieht einen Cache-Miss und holt die
+            // Daten gleich frisch von Chessable (Linien kommen dank RawLineCache aus dem Resume-Cache).
+            if (course is not null && !IsComplete(course))
+            {
+                _logger.LogWarning(
+                    "RawCourseCache: gecachter Kurs bid {Bid} ist unvollständig/korrupt (truncated Kapitel) — Eintrag wird gelöscht und sofort frisch geholt",
+                    bid);
+                var stale = await db.CachedRawCourses.FirstOrDefaultAsync(c => c.Bid == bid, ct);
+                if (stale is not null)
+                {
+                    db.CachedRawCourses.Remove(stale);
+                    await db.SaveChangesAsync(ct);
+                }
+                return null;
+            }
+            return course;
         }
         catch (Exception ex)
         {
@@ -77,11 +96,36 @@ public class RawCourseCache
         {
             if (string.IsNullOrWhiteSpace(ch.ChapterJsonContent) || ch.ChapterJsonContent == "{}")
                 return false;
+            // Truncated/korruptes Kapitel-JSON (nicht-leer, aber unvollständig — z.B. ~8 KB-Cut
+            // durch den VPN-Proxy) erkennen: muss vollständig als ResponseChapter parsen, sonst
+            // ist es ein vergifteter Teil-Fetch → nicht cachen (bzw. beim Lesen verwerfen).
+            try
+            {
+                if (JsonSerializer.Deserialize<ResponseChapter>(ch.ChapterJsonContent, JsonOpts) is null)
+                    return false;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
             if (ch.ResponseLineList is null)
                 continue;
             foreach (var ln in ch.ResponseLineList)
+            {
                 if (string.IsNullOrWhiteSpace(ln.LineJsonContent) || ln.LineJsonContent == "{}")
                     return false;
+                // Symmetrisch zum Kapitel: abgeschnittene/korrupte Linien-JSON ebenfalls als
+                // unvollständig werten (nicht cachen / beim Lesen verwerfen → sofort neu holen).
+                try
+                {
+                    if (JsonSerializer.Deserialize<ResponseLine>(ln.LineJsonContent, JsonOpts) is null)
+                        return false;
+                }
+                catch (JsonException)
+                {
+                    return false;
+                }
+            }
         }
         return true;
     }
@@ -91,7 +135,7 @@ public class RawCourseCache
         if (!IsComplete(course))
         {
             _logger.LogWarning(
-                "RawCourseCache.Set übersprungen für bid {Bid}: Kurs unvollständig (leere Kapitel/Linien) — nicht cachen, damit kein vergifteter Cache entsteht",
+                "RawCourseCache.Set übersprungen für bid {Bid}: Kurs unvollständig (leere/truncated Kapitel oder Linien) — nicht cachen, damit kein vergifteter Cache entsteht",
                 bid);
             return;
         }

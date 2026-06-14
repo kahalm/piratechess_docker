@@ -27,6 +27,13 @@ public class ChessableHttpService : IChessableHttpService
     private const int CourseFetchAttempts = 4;
     private const int ProxyRetryDelayMs = 4000;
 
+    // Der Kapitel-Abruf (getList) hatte bisher weder Validierung noch Retry: ein mitten im
+    // Stream abgebrochener Body (~8 KB-Truncation durch den VPN-Proxy) ist nicht-leer, aber
+    // unvollständig → er parst NICHT als ResponseChapter, wurde aber truncated gecacht und ließ
+    // beim Replay (lib.GetCourse) JsonSerializer crashen → der ganze Kurs-Import scheiterte.
+    // Daher abgeschnittene Kapitel sofort im selben Lauf neu vom Server holen.
+    private const int ChapterFetchAttempts = 4;
+
     // Zufälliger Abstand zwischen zwei aufeinanderfolgenden Zeilen-/Kapitel-Requests
     // (menschenähnliches Timing → senkt Chessables Block-Rate). Höher = weniger
     // Blocks, aber längere Kursdauer.
@@ -241,34 +248,52 @@ public class ChessableHttpService : IChessableHttpService
             var chapter = course.Course.Data[chapterIdx];
             onChapterProgress?.Invoke($"{chapterIdx + 1} / {course.Course.Data.Count}");
 
+            // Kapitel-Struktur (getList) mit Validierung + Retry holen: nur ein vollständig als
+            // ResponseChapter parsbarer Body wird akzeptiert. Ein leerer/abgeschnittener Body wird
+            // im selben Lauf erneut vom Server geholt, statt ihn truncated weiterzuverarbeiten und
+            // zu cachen (sonst Kurs lückenhaft bzw. Crash beim Replay).
             var chapterUrl = $"https://www.chessable.com/api/v1/getList?uid={uid}&bid={bid}&lid={chapter.Id}";
-            string chapterContent;
-            try
+            string chapterContent = "";
+            ResponseChapter? responseChapter = null;
+            for (int attempt = 0; attempt < ChapterFetchAttempts; attempt++)
             {
-                chapterContent = await CurlGetAsync(chapterUrl, bearer, "chapter", uid, ct);
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    chapterContent = await CurlGetAsync(chapterUrl, bearer, "chapter", uid, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to fetch chapter {ChapterId}, attempt {Attempt}", chapter.Id, attempt + 1);
+                    chapterContent = "";
+                }
+
+                responseChapter = TryParseChapter(chapterContent);
+                if (responseChapter is not null)
+                    break; // vollständig geparst → ok
+
+                if (attempt < ChapterFetchAttempts - 1)
+                {
+                    _logger.LogWarning(
+                        "Chapter {ChapterId} empty/truncated (len {Len}), retry {Attempt}/{Total}",
+                        chapter.Id, chapterContent?.Length ?? 0, attempt + 1, ChapterFetchAttempts);
+                    onRetry?.Invoke($"Kapitel {chapterIdx + 1}: unvollständig, Retry {attempt + 1}/{ChapterFetchAttempts} ...");
+                    await Task.Delay(ProxyRetryDelayMs, ct);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Chapter {ChapterId} still empty/truncated after {Total} attempts — skipping (course won't be cached)",
+                        chapter.Id, ChapterFetchAttempts);
+                    responseChapter = new ResponseChapter();
+                }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to fetch chapter {ChapterId}", chapter.Id);
-                chapterContent = "{}";
-            }
+            responseChapter ??= new ResponseChapter();
 
             var restResponseChapter = new RestResponseChapter
             {
                 ChapterJsonContent = chapterContent
             };
-
-            // Parse chapter to get lines
-            ResponseChapter? responseChapter;
-            try
-            {
-                responseChapter = JsonSerializer.Deserialize<ResponseChapter>(chapterContent, JsonOpts)
-                    ?? new ResponseChapter();
-            }
-            catch
-            {
-                responseChapter = new ResponseChapter();
-            }
 
             // 3. Fetch each line in the chapter
             for (int lineIdx = 0; lineIdx < responseChapter.List.Data.Count; lineIdx++)
@@ -304,7 +329,10 @@ public class ChessableHttpService : IChessableHttpService
                             lineContent = "";
                         }
 
-                        if (!string.IsNullOrWhiteSpace(lineContent) && lineContent != "{}")
+                        // Nur einen vollständig als ResponseLine parsbaren Body akzeptieren — ein
+                        // abgeschnittener (nicht-leerer) Body würde sonst als "Erfolg" durchgehen
+                        // und den Cache/Export vergiften.
+                        if (LineParses(lineContent))
                             break;
 
                         if (attempt < 9)
@@ -321,8 +349,9 @@ public class ChessableHttpService : IChessableHttpService
                         }
                     }
 
-                    // Nur erfolgreiche Linien cachen (SetAsync ignoriert leer/"{}") → kein vergifteter Cache.
-                    await _lineCache.SetAsync(line.Id, lineContent, ct);
+                    // Nur vollständig parsbare Linien cachen → kein vergifteter Resume-Cache.
+                    if (LineParses(lineContent))
+                        await _lineCache.SetAsync(line.Id, lineContent, ct);
                 }
 
                 restResponseChapter.ResponseLineList.Add(new RestResponseLine
@@ -450,6 +479,40 @@ public class ChessableHttpService : IChessableHttpService
     /// Solche Fehler sind nach wenigen Sekunden von selbst weg → ein Retry lohnt,
     /// im Gegensatz zu echten Fehlern (DNS, 401, …).
     /// </summary>
+    /// <summary>
+    /// Parst den getList-Body zu <see cref="ResponseChapter"/>. Liefert null bei leerem/<c>{}</c>-
+    /// Body ODER bei abgeschnittenem/korruptem JSON (JsonException) → Signal zum Neu-Holen.
+    /// Ein legitim leeres Kapitel (<c>{"list":{"data":[]}}</c>) parst dagegen und gilt als gültig.
+    /// </summary>
+    private static ResponseChapter? TryParseChapter(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content) || content == "{}")
+            return null;
+        try
+        {
+            return JsonSerializer.Deserialize<ResponseChapter>(content, JsonOpts);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>True, wenn der getGame-Body vollständig als <see cref="ResponseLine"/> parst.</summary>
+    private static bool LineParses(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content) || content == "{}")
+            return false;
+        try
+        {
+            return JsonSerializer.Deserialize<ResponseLine>(content, JsonOpts) is not null;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     public static bool IsTransientProxyFailure(int exitCode, string? error)
     {
         if (string.IsNullOrEmpty(error))
