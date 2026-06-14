@@ -145,7 +145,20 @@ namespace piratechess_lib
                     _errorCount++;
                     return coursename;
                 }
-                ResponseChapter responseChapter = JsonSerializer.Deserialize<ResponseChapter>(content, options: caseInvariant) ?? new ResponseChapter();
+                ResponseChapter responseChapter;
+                try
+                {
+                    responseChapter = JsonSerializer.Deserialize<ResponseChapter>(content, options: caseInvariant) ?? new ResponseChapter();
+                }
+                catch (JsonException)
+                {
+                    // Abgeschnittene/korrupte Kapitel-JSON (z.B. mitten im Stream abgebrochener
+                    // Fetch bzw. ~8 KB-Truncation durch den VPN-Proxy) überspringen statt den
+                    // ganzen Kurs-Export crashen zu lassen — der nicht-leere, aber unvollständige
+                    // Body rutscht sonst an der Leer-Prüfung oben vorbei.
+                    _errorCount++;
+                    return coursename;
+                }
                 coursename = responseChapter.List.Name;
                 int count = 0;
 
@@ -239,7 +252,18 @@ namespace piratechess_lib
                     _errorCount++;
                     return;
                 }
-                ResponseLine? game = JsonSerializer.Deserialize<ResponseLine>(content, options: caseInvariant);
+                ResponseLine? game;
+                try
+                {
+                    game = JsonSerializer.Deserialize<ResponseLine>(content, options: caseInvariant);
+                }
+                catch (JsonException)
+                {
+                    // Abgeschnittene/korrupte Linien-JSON überspringen statt crashen — wie beim
+                    // Kapitel oben killt sonst eine einzige unvollständige Linie den ganzen Kurs.
+                    _errorCount++;
+                    return;
+                }
                 string? pgn = game?.Game?.GeneratePGN(AllKeyMovesTraining, NoTrainingMove);
 
                 pgnHeader.FEN = game?.Game?.Initial ?? "";
