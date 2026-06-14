@@ -15,6 +15,7 @@ public class ChessableHttpService : IChessableHttpService
     private readonly ILogger<ChessableHttpService> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IVpnRotationService _vpn;
+    private readonly RawLineCache _lineCache;
     private readonly string _curlPath;
     private readonly string? _proxyUrl;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
@@ -48,11 +49,13 @@ public class ChessableHttpService : IChessableHttpService
         ILogger<ChessableHttpService> logger,
         IServiceScopeFactory scopeFactory,
         IVpnRotationService vpn,
+        RawLineCache lineCache,
         IConfiguration configuration)
     {
         _logger = logger;
         _scopeFactory = scopeFactory;
         _vpn = vpn;
+        _lineCache = lineCache;
 
         // Use curl-impersonate-chrome binary directly (NOT the wrapper scripts
         // which add their own browser headers causing duplicates)
@@ -276,50 +279,62 @@ public class ChessableHttpService : IChessableHttpService
                 onLineProgress?.Invoke($"{lineIdx + 1} / {responseChapter.List.Data.Count}");
 
                 var lineUrl = $"https://www.chessable.com/api/v1/getGame?lng=en&uid={uid}&oid={line.Id}";
-                string lineContent = "";
                 string round = $"{(chapterIdx + 2):000}.{(lineIdx + 2):000}";
 
-                for (int attempt = 0; attempt < 10; attempt++)
+                // Resume-Cache: eine schon einmal erfolgreich geholte Linie (oid) wiederverwenden →
+                // kein Chessable-Call, keine Inter-Request-Pause. Bricht ein Kursabruf in der Mitte
+                // ab, holt der Neustart so nur noch die fehlenden Linien.
+                string? lineContent = await _lineCache.GetAsync(line.Id, ct);
+                bool fromCache = lineContent is not null;
+
+                if (!fromCache)
                 {
-                    ct.ThrowIfCancellationRequested();
+                    lineContent = "";
+                    for (int attempt = 0; attempt < 10; attempt++)
+                    {
+                        ct.ThrowIfCancellationRequested();
 
-                    try
-                    {
-                        lineContent = await CurlGetAsync(lineUrl, bearer, "line", uid, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "curl failed for line {LineId}, attempt {Attempt}", line.Id, attempt + 1);
-                        lineContent = "";
+                        try
+                        {
+                            lineContent = await CurlGetAsync(lineUrl, bearer, "line", uid, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "curl failed for line {LineId}, attempt {Attempt}", line.Id, attempt + 1);
+                            lineContent = "";
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(lineContent) && lineContent != "{}")
+                            break;
+
+                        if (attempt < 9)
+                        {
+                            onRetry?.Invoke($"[{round}] Retry {attempt + 1}/10 ...");
+                            await Task.Delay(30000 + Random.Shared.Next(0, 5000), ct);
+                        }
+                        else
+                        {
+                            _logger.LogWarning(
+                                "Chessable line fetch gave up after 10 attempts, skipping line {LineId} (round {Round})",
+                                line.Id, round);
+                            onRetry?.Invoke($"[{round}] FAILED after 10 attempts, skipping.");
+                        }
                     }
 
-                    if (!string.IsNullOrWhiteSpace(lineContent) && lineContent != "{}")
-                        break;
-
-                    if (attempt < 9)
-                    {
-                        onRetry?.Invoke($"[{round}] Retry {attempt + 1}/10 ...");
-                        await Task.Delay(30000 + Random.Shared.Next(0, 5000), ct);
-                    }
-                    else
-                    {
-                        _logger.LogWarning(
-                            "Chessable line fetch gave up after 10 attempts, skipping line {LineId} (round {Round})",
-                            line.Id, round);
-                        onRetry?.Invoke($"[{round}] FAILED after 10 attempts, skipping.");
-                    }
+                    // Nur erfolgreiche Linien cachen (SetAsync ignoriert leer/"{}") → kein vergifteter Cache.
+                    await _lineCache.SetAsync(line.Id, lineContent, ct);
                 }
 
                 restResponseChapter.ResponseLineList.Add(new RestResponseLine
                 {
-                    LineJsonContent = lineContent
+                    LineJsonContent = lineContent ?? ""
                 });
 
                 cumLines++;
                 onCumulativeLines?.Invoke(cumLines.ToString());
 
-                // Random delay between line requests
-                if (lineIdx < responseChapter.List.Data.Count - 1)
+                // Random delay between line requests — nur nach echtem Request (Cache-Treffer braucht keine).
+                if (!fromCache && lineIdx < responseChapter.List.Data.Count - 1)
                     await Task.Delay(Random.Shared.Next(InterRequestDelayMinMs, InterRequestDelayMaxMs), ct);
             }
 

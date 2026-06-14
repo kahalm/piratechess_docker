@@ -14,6 +14,7 @@ public class AppDbContext : DbContext
     public DbSet<ExportHistory> ExportHistories => Set<ExportHistory>();
     public DbSet<ChessableRawResponse> ChessableRawResponses => Set<ChessableRawResponse>();
     public DbSet<CachedRawCourse> CachedRawCourses => Set<CachedRawCourse>();
+    public DbSet<CachedRawLine> CachedRawLines => Set<CachedRawLine>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -21,6 +22,12 @@ public class AppDbContext : DbContext
         {
             e.HasIndex(c => c.Bid).IsUnique();
             e.Property(c => c.RestResponseJson).HasColumnType("LONGTEXT");
+        });
+
+        modelBuilder.Entity<CachedRawLine>(e =>
+        {
+            e.HasIndex(c => c.Oid).IsUnique();
+            e.Property(c => c.LineJsonContent).HasColumnType("LONGTEXT");
         });
 
         modelBuilder.Entity<AppUser>(e =>
