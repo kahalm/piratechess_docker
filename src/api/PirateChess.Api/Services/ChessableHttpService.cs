@@ -403,8 +403,12 @@ public class ChessableHttpService : IChessableHttpService
                 transientProxyFailure = IsTransientProxyFailure(exitCode, stderr);
             }
 
-            _logger.LogDebug("curl response length: {Length}, preview: {Preview}",
-                stdout.Length, stdout.Length > 100 ? stdout[..100] + "..." : stdout);
+            // Pro Request EINE Info-Zeile mit Outcome: Chessable liefert bei IP-basiertem
+            // Soft-Block ein leeres "{}" (Länge ≤2) trotz Transport-Erfolg → als BLOCKED
+            // markieren, damit Block-Rate + Timing direkt aus den Logs ablesbar sind.
+            var blocked = stdout.Length <= 2;
+            _logger.LogInformation("curl {Endpoint} → {Length}B {Outcome} ({Ms}ms)",
+                endpoint, stdout.Length, blocked ? "BLOCKED(empty)" : "ok", sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
