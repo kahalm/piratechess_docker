@@ -66,20 +66,17 @@ public class RawCourseCache
         }
     }
 
-    /// <summary>Leichter Existenz-Check (ohne die Rohdaten zu laden/dekomprimieren).</summary>
+    /// <summary>
+    /// True nur, wenn ein VOLLSTÄNDIG verwertbarer Cache für den Kurs vorliegt. Delegiert an
+    /// <see cref="GetAsync"/> → ein unvollständiger/truncated Eintrag liefert dort null (und wird
+    /// dabei selbstheilend gelöscht). Wichtig: rookhub entscheidet anhand dieses Checks zwischen
+    /// dem seriellen Fetch-Queue-Pfad und dem sofortigen (parallelen) Detached-Pfad. Würde hier
+    /// ein vergifteter Eintrag als „cached" gelten, liefe der eigentlich nötige Chessable-Abruf
+    /// am seriellen Pfad vorbei → mehrere Kurse zögen parallel über dieselbe VPN-IP.
+    /// (Lädt/dekomprimiert die Rohdaten — passiert nur einmal pro Import-Start, kein Hot-Path.)
+    /// </summary>
     public async Task<bool> ExistsAsync(string bid, CancellationToken ct = default)
-    {
-        try
-        {
-            using var scope = _scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            return await db.CachedRawCourses.AsNoTracking().AnyAsync(c => c.Bid == bid, ct);
-        }
-        catch
-        {
-            return false;
-        }
-    }
+        => await GetAsync(bid, ct) is not null;
 
     /// <summary>
     /// Ein Kurs gilt als vollständig (und damit cache-würdig), wenn er mind. ein Kapitel hat

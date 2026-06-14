@@ -168,6 +168,48 @@ public class RawCourseCacheTests
         }
     }
 
+    [Fact]
+    public async Task ExistsAsync_CompleteCachedCourse_True()
+    {
+        var cache = BuildCache();
+        await cache.SetAsync("bidOK", Complete("{}"));
+        Assert.True(await cache.ExistsAsync("bidOK"));
+        Assert.False(await cache.ExistsAsync("nope"));
+    }
+
+    // Kern des Parallel-Lauf-Fixes: ein vergifteter (truncated) Cache darf NICHT als „cached"
+    // gelten — sonst nimmt rookhub den parallelen Detached-Pfad statt der seriellen Fetch-Queue.
+    [Fact]
+    public async Task ExistsAsync_TruncatedCachedCourse_False_AndDeleted()
+    {
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sp = services.BuildServiceProvider();
+        var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+        var cache = new RawCourseCache(scopeFactory, NullLogger<RawCourseCache>.Instance);
+
+        var poisoned = Complete("{}");
+        poisoned.ChapterList[0].ChapterJsonContent = "{\"list\":{\"data\":[{\"id\":1},{\"id";
+        using (var scope = scopeFactory.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.CachedRawCourses.Add(new CachedRawCourse
+            {
+                Bid = "poison",
+                RestResponseJson = GzipBase64(JsonSerializer.Serialize(poisoned)),
+                CachedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        Assert.False(await cache.ExistsAsync("poison")); // gilt NICHT als cached → serieller Pfad
+
+        using var verifyScope = scopeFactory.CreateScope();
+        var vdb = verifyScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.False(await vdb.CachedRawCourses.AnyAsync(c => c.Bid == "poison")); // selbstheilend gelöscht
+    }
+
     // gzip+Base64 wie RawCourseCache.Compress (privat) — für das direkte Seeden eines Roh-Eintrags.
     private static string GzipBase64(string text)
     {
