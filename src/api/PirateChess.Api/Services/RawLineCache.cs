@@ -1,5 +1,3 @@
-using System.IO.Compression;
-using System.Text;
 using Microsoft.EntityFrameworkCore;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.Entities;
@@ -43,7 +41,7 @@ public class RawLineCache
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var row = await db.CachedRawLines.AsNoTracking().FirstOrDefaultAsync(c => c.Oid == oid, ct);
             if (row is null || string.IsNullOrEmpty(row.LineJsonContent)) return null;
-            return Decompress(row.LineJsonContent);
+            return GzipText.Decompress(row.LineJsonContent);
         }
         catch (Exception ex)
         {
@@ -61,7 +59,7 @@ public class RawLineCache
         {
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var compressed = Compress(content);
+            var compressed = GzipText.Compress(content);
             var row = await db.CachedRawLines.FirstOrDefaultAsync(c => c.Oid == oid, ct);
             if (row is null)
                 db.CachedRawLines.Add(new CachedRawLine { Oid = oid, LineJsonContent = compressed, CachedAt = DateTime.UtcNow });
@@ -78,23 +76,4 @@ public class RawLineCache
         }
     }
 
-    /// <summary>gzip + Base64 — schrumpft das Linien-JSON deutlich.</summary>
-    private static string Compress(string text)
-    {
-        var bytes = Encoding.UTF8.GetBytes(text);
-        using var output = new MemoryStream();
-        using (var gz = new GZipStream(output, CompressionLevel.Optimal))
-            gz.Write(bytes, 0, bytes.Length);
-        return Convert.ToBase64String(output.ToArray());
-    }
-
-    private static string Decompress(string base64)
-    {
-        var data = Convert.FromBase64String(base64);
-        using var input = new MemoryStream(data);
-        using var gz = new GZipStream(input, CompressionMode.Decompress);
-        using var output = new MemoryStream();
-        gz.CopyTo(output);
-        return Encoding.UTF8.GetString(output.ToArray());
-    }
 }

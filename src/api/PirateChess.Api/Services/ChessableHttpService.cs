@@ -548,7 +548,10 @@ public class ChessableHttpService : IChessableHttpService
                 ChessableUid = chessableUid,
                 Url = url.Length > 500 ? url[..500] : url,
                 StatusCode = statusCode,
-                RawJson = body ?? string.Empty,
+                // gzip+Base64: die Roh-Bodies (Linien Ø ~210 KB, Kapitel Ø ~500 KB) waren bisher
+                // unkomprimiert der mit Abstand größte Tabellen-Anteil. Niemand liest RawJson im Code
+                // (reines Audit/Debug) → Kompression ist verhaltensneutral, ~3× kleiner.
+                RawJson = GzipText.Compress(body ?? string.Empty),
                 DurationMs = durationMs,
                 ErrorMessage = errorMessage,
                 RequestedAt = DateTime.UtcNow

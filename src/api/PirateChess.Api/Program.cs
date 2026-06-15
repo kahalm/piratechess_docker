@@ -141,6 +141,9 @@ builder.Services.AddSingleton<IChessableHttpService, ChessableHttpService>();
 // Background export worker
 builder.Services.AddHostedService<ExportBackgroundService>();
 
+// Hält die Audit-Tabelle ChessableRawResponses klein (Retention, Default 14 Tage)
+builder.Services.AddHostedService<RawResponseRetentionService>();
+
 // SignalR
 builder.Services.AddSignalR();
 
