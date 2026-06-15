@@ -35,10 +35,12 @@ public class ChessableHttpService : IChessableHttpService
     private const int ChapterFetchAttempts = 4;
 
     // Zufälliger Abstand zwischen zwei aufeinanderfolgenden Zeilen-/Kapitel-Requests
-    // (menschenähnliches Timing → senkt Chessables Block-Rate). Höher = weniger
-    // Blocks, aber längere Kursdauer.
-    private const int InterRequestDelayMinMs = 2000;
-    private const int InterRequestDelayMaxMs = 5000;
+    // (menschenähnliches Timing). Prod-Messung 2026-06-15: Chessables Block ist NICHT
+    // timing-getrieben sondern requests-pro-IP-getrieben (IP wird nach ~10 Requests
+    // soft-geblockt, daher steuert Vpn:RotateAfterRequests=10 die Block-Rate ~0%).
+    // Delay 2–5s brachte gg. Block nichts → zurück auf 1–2s, spart Kursdauer.
+    private const int InterRequestDelayMinMs = 1000;
+    private const int InterRequestDelayMaxMs = 2000;
 
     // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
     private const string TlsFlags =
