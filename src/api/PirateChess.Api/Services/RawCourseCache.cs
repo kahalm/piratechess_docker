@@ -21,12 +21,24 @@ public class RawCourseCache
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RawCourseCache> _logger;
+    private readonly int _maxCompressedPayloadBytes;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
-    public RawCourseCache(IServiceScopeFactory scopeFactory, ILogger<RawCourseCache> logger)
+    /// <summary>
+    /// Obergrenze für einen einzelnen Cache-Eintrag (komprimierte Base64-Länge ≈ Paket-Bytes).
+    /// Muss unter MariaDBs <c>max_allowed_packet</c> (Prod/Dev: 256 MB) bleiben — sonst scheitert
+    /// der INSERT mit "Error submitting NMB packet". Default 200 MB lässt Reserve fürs Statement.
+    /// </summary>
+    public const int DefaultMaxCompressedPayloadBytes = 200 * 1024 * 1024;
+
+    public RawCourseCache(
+        IServiceScopeFactory scopeFactory,
+        ILogger<RawCourseCache> logger,
+        int maxCompressedPayloadBytes = DefaultMaxCompressedPayloadBytes)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _maxCompressedPayloadBytes = maxCompressedPayloadBytes;
     }
 
     public async Task<RestResponseCourse?> GetAsync(string bid, CancellationToken ct = default)
@@ -141,6 +153,17 @@ public class RawCourseCache
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var compressed = Compress(JsonSerializer.Serialize(course));
+            // Selbst komprimiert sprengen einzelne Riesen-Kurse MariaDBs max_allowed_packet (Prod/Dev
+            // 256 MB). Solche Einträge lassen sich nicht persistent cachen → sauber überspringen, statt
+            // den INSERT mit "Error submitting NMB packet" crashen zu lassen (was bei jedem Import erneut
+            // Error-Logs produzierte). Der Kurs wird dann eben bei jedem Import frisch geholt.
+            if (compressed.Length > _maxCompressedPayloadBytes)
+            {
+                _logger.LogWarning(
+                    "RawCourseCache.Set übersprungen für bid {Bid}: komprimierte Rohdaten ({Size} Bytes) überschreiten das Cache-Limit ({Limit} Bytes / max_allowed_packet) — Kurs wird nicht gecacht",
+                    bid, compressed.Length, _maxCompressedPayloadBytes);
+                return;
+            }
             var row = await db.CachedRawCourses.FirstOrDefaultAsync(c => c.Bid == bid, ct);
             if (row is null)
                 db.CachedRawCourses.Add(new CachedRawCourse { Bid = bid, RestResponseJson = compressed, CachedAt = DateTime.UtcNow });

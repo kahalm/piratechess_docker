@@ -132,6 +132,43 @@ public class RawCourseCacheTests
         Assert.True(RawCourseCache.IsComplete(c));
     }
 
+    // --- Packet-Härtung (prod): zu großer (komprimierter) Kurs sprengt max_allowed_packet ---
+
+    [Fact]
+    public async Task Set_CompressedExceedsLimit_NotCached()
+    {
+        // Mini-Cap (1 Byte) erzwingt, dass selbst ein vollständiger Mini-Kurs als "zu groß" gilt
+        // → wird übersprungen statt mit "Error submitting NMB packet" zu crashen.
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sp = services.BuildServiceProvider();
+        var cache = new RawCourseCache(
+            sp.GetRequiredService<IServiceScopeFactory>(), NullLogger<RawCourseCache>.Instance,
+            maxCompressedPayloadBytes: 1);
+
+        await cache.SetAsync("toobig", Complete("{\"course\":{\"data\":[]}}"));
+
+        Assert.Null(await cache.GetAsync("toobig")); // Limit überschritten → nicht gecacht
+    }
+
+    [Fact]
+    public async Task Set_CompressedWithinLimit_IsCached()
+    {
+        // Gegenprobe: großzügiges Limit → vollständiger Kurs wird normal gecacht.
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sp = services.BuildServiceProvider();
+        var cache = new RawCourseCache(
+            sp.GetRequiredService<IServiceScopeFactory>(), NullLogger<RawCourseCache>.Instance,
+            maxCompressedPayloadBytes: 10 * 1024 * 1024);
+
+        await cache.SetAsync("ok", Complete("{\"course\":{\"data\":[]}}"));
+
+        Assert.NotNull(await cache.GetAsync("ok"));
+    }
+
     // Selbstheilung: ein bereits (vor der Härtung) truncated gecachter Kurs wird beim Lesen
     // erkannt, gelöscht und als Cache-Miss gemeldet → der laufende Import zieht sofort frisch.
     [Fact]

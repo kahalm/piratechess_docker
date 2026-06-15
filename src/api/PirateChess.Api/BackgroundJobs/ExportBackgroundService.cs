@@ -17,6 +17,11 @@ public class ExportBackgroundService : BackgroundService
     private readonly ILogger<ExportBackgroundService> _logger;
     private readonly IChessableHttpService _chessableHttp;
 
+    // Oberhalb dieser Größe wird das (ohnehin leserlose) Audit-Bundle CachedCourse.RestResponseJson
+    // nicht abgelegt — unkomprimiert würde es sonst MariaDBs max_allowed_packet (Prod/Dev 256 MB)
+    // sprengen und diesen ungeschützten SaveChanges (und damit den Export) abbrechen.
+    private const int MaxAuditJsonChars = 16 * 1024 * 1024;
+
     public ExportBackgroundService(
         ExportJobQueue queue,
         IServiceScopeFactory scopeFactory,
@@ -220,9 +225,20 @@ public class ExportBackgroundService : BackgroundService
         }
 
         cachedCourse.CourseName = courseName;
-        cachedCourse.RestResponseJson = fetchedData is not null
-            ? JsonSerializer.Serialize(fetchedData)
-            : "{}";
+        // CachedCourse.RestResponseJson ist ein reines Audit/Debug-Bundle (kein Leser; die Einzel-Calls
+        // liegen granular in ChessableRawResponse, die cache-relevante Kopie komprimiert in
+        // CachedRawCourse). Unkomprimiert sprengt es bei Riesen-Kursen MariaDBs max_allowed_packet und
+        // würde — anders als der Roh-Cache — diesen ungeschützten SaveChanges und damit den Export
+        // abbrechen. Darum nur ablegen, solange es klein genug ist, sonst leeren Marker speichern.
+        var auditJson = fetchedData is not null ? JsonSerializer.Serialize(fetchedData) : "{}";
+        if (auditJson.Length > MaxAuditJsonChars)
+        {
+            _logger.LogInformation(
+                "Audit-RestResponseJson für bid {Bid} ({Size} Zeichen) überschreitet {Limit} — wird nicht im CachedCourse abgelegt (Roh-Cache/ChessableRawResponse bleiben unberührt)",
+                job.ChessableBid, auditJson.Length, MaxAuditJsonChars);
+            auditJson = "{}";
+        }
+        cachedCourse.RestResponseJson = auditJson;
         cachedCourse.CachedAt = DateTime.UtcNow;
 
         await db.SaveChangesAsync(ct);
