@@ -25,7 +25,7 @@ public class RawCourseCacheTests
     {
         var c = new RestResponseCourse { CourseJsonContent = courseJson };
         var ch = new RestResponseChapter { ChapterJsonContent = "{\"list\":{}}" };
-        ch.ResponseLineList.Add(new RestResponseLine { LineJsonContent = "{\"game\":{}}" });
+        ch.ResponseLineList.Add(new RestResponseLine { Oid = 1, LineJsonContent = "{\"game\":{}}" });
         c.ChapterList.Add(ch);
         return c;
     }
@@ -167,6 +167,71 @@ public class RawCourseCacheTests
         await cache.SetAsync("ok", Complete("{\"course\":{\"data\":[]}}"));
 
         Assert.NotNull(await cache.GetAsync("ok"));
+    }
+
+    // --- Struktur-statt-Inhalt: Kurs-Blob speichert nur Kapitel + Linien-Oids, Inhalt kommt aus CachedRawLines ---
+
+    [Fact]
+    public async Task Set_StoresStructureOnly_AndReconstructsFromLineCache()
+    {
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sp = services.BuildServiceProvider();
+        var sf = sp.GetRequiredService<IServiceScopeFactory>();
+        var cache = new RawCourseCache(sf, NullLogger<RawCourseCache>.Instance);
+
+        var course = Complete("{\"c\":1}");
+        course.ChapterList[0].ResponseLineList[0].Oid = 4242;
+        course.ChapterList[0].ResponseLineList[0].LineJsonContent = "{\"game\":{\"x\":1}}";
+        await cache.SetAsync("bidS", course);
+
+        var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            // Im Blob steht nur die Struktur: Oid gesetzt, Inhalt leer.
+            var raw = await db.CachedRawCourses.AsNoTracking().FirstAsync(c => c.Bid == "bidS");
+            var stored = JsonSerializer.Deserialize<RestResponseCourse>(GzipText.Decompress(raw.RestResponseJson), opts)!;
+            Assert.Equal(4242, stored.ChapterList[0].ResponseLineList[0].Oid);
+            Assert.True(string.IsNullOrEmpty(stored.ChapterList[0].ResponseLineList[0].LineJsonContent));
+            // Inhalt liegt im per-Oid-Cache.
+            Assert.True(await db.CachedRawLines.AnyAsync(l => l.Oid == 4242));
+        }
+
+        // GetAsync rekonstruiert den Inhalt aus dem Linien-Cache.
+        var got = await cache.GetAsync("bidS");
+        Assert.Equal("{\"game\":{\"x\":1}}", got!.ChapterList[0].ResponseLineList[0].LineJsonContent);
+        Assert.Equal("{\"c\":1}", got.CourseJsonContent);
+    }
+
+    [Fact]
+    public async Task Get_StructureWithMissingLine_ReturnsNull()
+    {
+        // Struktur-Eintrag, dessen referenzierte Linie NICHT im Linien-Cache liegt → unvollständig → Miss.
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sp = services.BuildServiceProvider();
+        var sf = sp.GetRequiredService<IServiceScopeFactory>();
+        var cache = new RawCourseCache(sf, NullLogger<RawCourseCache>.Instance);
+
+        var structureOnly = Complete("{}");
+        structureOnly.ChapterList[0].ResponseLineList[0].Oid = 9999;
+        structureOnly.ChapterList[0].ResponseLineList[0].LineJsonContent = null; // nur Referenz, kein Inhalt
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.CachedRawCourses.Add(new CachedRawCourse
+            {
+                Bid = "miss",
+                RestResponseJson = GzipBase64(JsonSerializer.Serialize(structureOnly)),
+                CachedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Null(await cache.GetAsync("miss")); // Linie 9999 fehlt → IsComplete false → Cache-Miss
     }
 
     // Selbstheilung: ein bereits (vor der Härtung) truncated gecachter Kurs wird beim Lesen

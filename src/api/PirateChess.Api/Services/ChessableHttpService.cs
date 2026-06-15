@@ -362,6 +362,7 @@ public class ChessableHttpService : IChessableHttpService
 
                 restResponseChapter.ResponseLineList.Add(new RestResponseLine
                 {
+                    Oid = line.Id,
                     LineJsonContent = lineContent ?? ""
                 });
 

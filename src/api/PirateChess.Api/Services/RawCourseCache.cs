@@ -1,5 +1,3 @@
-using System.IO.Compression;
-using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using piratechess_lib;
@@ -49,8 +47,14 @@ public class RawCourseCache
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var row = await db.CachedRawCourses.AsNoTracking().FirstOrDefaultAsync(c => c.Bid == bid, ct);
             if (row is null || string.IsNullOrEmpty(row.RestResponseJson)) return null;
-            var json = Decompress(row.RestResponseJson);
+            var json = GzipText.Decompress(row.RestResponseJson);
             var course = JsonSerializer.Deserialize<RestResponseCourse>(json, JsonOpts);
+
+            // Struktur-Format: Linieninhalte stehen nicht im Kurs-Blob, sondern je Oid in CachedRawLines.
+            // Vor der Vollständigkeitsprüfung nachfüllen (fehlt eine Linie, bleibt sie leer → IsComplete
+            // schlägt fehl → Selbstheilung unten greift wie bei einem truncated Eintrag).
+            if (course is not null)
+                await ReconstructLinesAsync(db, course, ct);
 
             // Selbstheilung: ein (vor dieser Härtung) truncated gecachter Kurs würde sonst jeden
             // Import erneut crashen lassen. Beim Lesen prüfen und einen korrupten Eintrag SOFORT
@@ -152,7 +156,11 @@ public class RawCourseCache
         {
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var compressed = Compress(JsonSerializer.Serialize(course));
+            // Linieninhalte in den per-Oid-Cache spiegeln (idempotent), dann nur die Struktur (Kapitel
+            // + Linien-Oids) speichern — die Inhalte liegen pro Oid in CachedRawLines und werden beim
+            // Lesen rekonstruiert. Spart den Großteil der Größe (Linien = ~95 %).
+            await SeedLinesAsync(db, course, ct);
+            var compressed = GzipText.Compress(JsonSerializer.Serialize(ToStructure(course)));
             // Selbst komprimiert sprengen einzelne Riesen-Kurse MariaDBs max_allowed_packet (Prod/Dev
             // 256 MB). Solche Einträge lassen sich nicht persistent cachen → sauber überspringen, statt
             // den INSERT mit "Error submitting NMB packet" crashen zu lassen (was bei jedem Import erneut
@@ -180,23 +188,84 @@ public class RawCourseCache
         }
     }
 
-    /// <summary>gzip + Base64 — schrumpft das große Kurs-JSON deutlich (gut komprimierbar).</summary>
-    private static string Compress(string text)
+    /// <summary>
+    /// Struktur-Kopie OHNE Linieninhalt: jede Linie behält nur ihre <see cref="RestResponseLine.Oid"/>,
+    /// der <c>LineJsonContent</c> wird weggelassen (kommt beim Lesen aus <c>CachedRawLines</c>). Das
+    /// hält den Kurs-Blob klein — die Linieninhalte (~95 % der Größe) liegen ohnehin schon pro Oid im
+    /// Linien-Cache. Kapitel-JSON bleibt erhalten (kein separater Kapitel-Cache).
+    /// </summary>
+    private static RestResponseCourse ToStructure(RestResponseCourse course) => new()
     {
-        var bytes = Encoding.UTF8.GetBytes(text);
-        using var output = new MemoryStream();
-        using (var gz = new GZipStream(output, CompressionLevel.Optimal))
-            gz.Write(bytes, 0, bytes.Length);
-        return Convert.ToBase64String(output.ToArray());
+        CourseJsonContent = course.CourseJsonContent,
+        ChapterList = course.ChapterList.Select(ch => new RestResponseChapter
+        {
+            ChapterJsonContent = ch.ChapterJsonContent,
+            ResponseLineList = ch.ResponseLineList
+                .Select(ln => new RestResponseLine { Oid = ln.Oid, LineJsonContent = null })
+                .ToList()
+        }).ToList()
+    };
+
+    /// <summary>
+    /// Spiegelt die Linieninhalte des Kurses in den per-Oid-Cache (<c>CachedRawLines</c>), damit
+    /// <see cref="GetAsync"/> sie aus dem Struktur-Blob rekonstruieren kann. In der Praxis hat der
+    /// Fetch die Linien bereits gecacht → der Existenz-Check findet alle vor und schreibt nichts
+    /// (nur eine günstige Abfrage). Macht den Kurs-Cache aber self-contained (robust, falls eine
+    /// Linie beim Fetch nicht im Cache landete).
+    /// </summary>
+    private static async Task SeedLinesAsync(AppDbContext db, RestResponseCourse course, CancellationToken ct)
+    {
+        var lines = course.ChapterList
+            .SelectMany(ch => ch.ResponseLineList)
+            .Where(ln => ln.Oid > 0 && !string.IsNullOrEmpty(ln.LineJsonContent))
+            .GroupBy(ln => ln.Oid).Select(g => g.First())
+            .ToList();
+        if (lines.Count == 0) return;
+
+        var existing = new HashSet<int>();
+        foreach (var chunk in lines.Select(l => l.Oid).Chunk(1000))
+            existing.UnionWith(await db.CachedRawLines.AsNoTracking()
+                .Where(c => chunk.Contains(c.Oid)).Select(c => c.Oid).ToListAsync(ct));
+
+        var toAdd = lines.Where(l => !existing.Contains(l.Oid))
+            .Select(l => new CachedRawLine
+            {
+                Oid = l.Oid,
+                LineJsonContent = GzipText.Compress(l.LineJsonContent!),
+                CachedAt = DateTime.UtcNow
+            }).ToList();
+        if (toAdd.Count == 0) return;
+        db.CachedRawLines.AddRange(toAdd);
+        await db.SaveChangesAsync(ct);
     }
 
-    private static string Decompress(string base64)
+    /// <summary>
+    /// Füllt fehlende Linieninhalte (neues Struktur-Format: <c>Oid &gt; 0</c>, leerer Content) aus
+    /// <c>CachedRawLines</c> nach — gebatcht. Alte Voll-Blobs (Content vorhanden / Oid 0) bleiben
+    /// unangetastet → abwärtskompatibel.
+    /// </summary>
+    private static async Task ReconstructLinesAsync(AppDbContext db, RestResponseCourse course, CancellationToken ct)
     {
-        var data = Convert.FromBase64String(base64);
-        using var input = new MemoryStream(data);
-        using var gz = new GZipStream(input, CompressionMode.Decompress);
-        using var output = new MemoryStream();
-        gz.CopyTo(output);
-        return Encoding.UTF8.GetString(output.ToArray());
+        var missing = course.ChapterList
+            .SelectMany(ch => ch.ResponseLineList)
+            .Where(ln => ln.Oid > 0 && string.IsNullOrEmpty(ln.LineJsonContent))
+            .Select(ln => ln.Oid).Distinct().ToList();
+        if (missing.Count == 0) return;
+
+        var byOid = new Dictionary<int, string>();
+        foreach (var chunk in missing.Chunk(1000))
+        {
+            var rows = await db.CachedRawLines.AsNoTracking()
+                .Where(c => chunk.Contains(c.Oid))
+                .Select(c => new { c.Oid, c.LineJsonContent })
+                .ToListAsync(ct);
+            foreach (var r in rows)
+                if (!string.IsNullOrEmpty(r.LineJsonContent))
+                    byOid[r.Oid] = GzipText.Decompress(r.LineJsonContent);
+        }
+
+        foreach (var ln in course.ChapterList.SelectMany(ch => ch.ResponseLineList))
+            if (ln.Oid > 0 && string.IsNullOrEmpty(ln.LineJsonContent) && byOid.TryGetValue(ln.Oid, out var content))
+                ln.LineJsonContent = content;
     }
 }

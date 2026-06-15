@@ -586,6 +586,9 @@ namespace piratechess_lib
     }
     public class RestResponseLine
     {
+        /// <summary>Globale Chessable-Linien-ID (oid). Schlüssel für den per-Linie-Cache
+        /// (CachedRawLines) → erlaubt es, im Kurs-Cache nur die Referenz statt des Inhalts abzulegen.</summary>
+        public int Oid { get; set; }
         public string? LineJsonContent { get; set; }
     }
     public class RestResponseChapter
