@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using piratechess_lib;
@@ -93,6 +94,15 @@ public class RawCourseCache
     /// </summary>
     public async Task<bool> ExistsAsync(string bid, CancellationToken ct = default)
         => await GetAsync(bid, ct) is not null;
+
+    // Per-Bid-Lock, damit nicht zwei gleichzeitige Cache-Misses desselben Kurses BEIDE über die (eine)
+    // VPN-IP fetchen (verdoppelte Last → höhere Chessable-Block-Rate). Aufrufer: Lock holen, Cache
+    // ERNEUT prüfen (double-checked), nur bei weiterhin Miss fetchen. Ein Eintrag je bekanntem bid
+    // (Kurs-Katalog ist klein) → vernachlässigbarer, dauerhafter Speicher.
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _bidLocks = new();
+
+    /// <summary>Liefert das (geteilte) Lock-Objekt für einen bid — für den Miss→Fetch→Set-Pfad.</summary>
+    public SemaphoreSlim BidLock(string bid) => _bidLocks.GetOrAdd(bid, _ => new SemaphoreSlim(1, 1));
 
     /// <summary>
     /// Alle gecachten Kurs-Bids auf einen Schlag (für rookhub, um eine Kursliste mit einem
