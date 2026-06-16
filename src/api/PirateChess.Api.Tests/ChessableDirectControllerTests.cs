@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace PirateChess.Api.Tests;
 
@@ -227,6 +228,35 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.False(body!.Cached);
     }
 
+    [Fact]
+    public async Task CachedBids_MissingServiceKey_Returns401()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/chessable/direct/courses/cached");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CachedBids_ReturnsSeededBids()
+    {
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<PirateChess.Api.Data.AppDbContext>();
+            db.CachedRawCourses.Add(new PirateChess.Api.Models.Entities.CachedRawCourse
+            {
+                Bid = "bulk-cached-1", RestResponseJson = "x", CachedAt = System.DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = ClientWithServiceKey();
+        var response = await client.GetAsync("/api/chessable/direct/courses/cached");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CachedBidsResp>(JsonOpts);
+        Assert.Contains("bulk-cached-1", body!.Bids);
+    }
+
+    private record CachedBidsResp(List<string> Bids);
     private record CachedResp(bool Cached);
     private record DirectTestResp(string Uid, int CourseCount);
     private record CourseItem(string Bid, string Name);

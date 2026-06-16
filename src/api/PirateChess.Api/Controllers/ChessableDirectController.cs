@@ -145,6 +145,12 @@ public class ChessableDirectController : ControllerBase
     public async Task<IActionResult> CourseCached(string bid, CancellationToken ct)
         => Ok(new { cached = await _rawCache.ExistsAsync(bid, ct) });
 
+    /// <summary>Alle gecachten Kurs-Bids auf einmal — rookhub reichert damit die Kursliste mit einem
+    /// „gecacht/sofort verfügbar"-Flag an (1 Call statt N).</summary>
+    [HttpGet("courses/cached")]
+    public async Task<IActionResult> CachedBids(CancellationToken ct)
+        => Ok(new { bids = (await _rawCache.GetAllCachedBidsAsync(ct)).ToList() });
+
     [HttpPost("course/start")]
     public IActionResult StartCourse([FromBody] DirectCourseRequest request)
     {

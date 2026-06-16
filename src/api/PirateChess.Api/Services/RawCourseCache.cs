@@ -95,6 +95,28 @@ public class RawCourseCache
         => await GetAsync(bid, ct) is not null;
 
     /// <summary>
+    /// Alle gecachten Kurs-Bids auf einen Schlag (für rookhub, um eine Kursliste mit einem
+    /// „gecacht"-Flag anzureichern — 1 Call statt N <see cref="ExistsAsync"/>). Bewusst KEINE
+    /// Vollständigkeitsprüfung pro Eintrag (zu teuer, würde alle Blobs dekomprimieren); ein evtl.
+    /// truncated Eintrag heilt sich beim nächsten echten Abruf via <see cref="GetAsync"/> selbst.
+    /// </summary>
+    public async Task<HashSet<string>> GetAllCachedBidsAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var bids = await db.CachedRawCourses.AsNoTracking().Select(c => c.Bid).ToListAsync(ct);
+            return new HashSet<string>(bids);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RawCourseCache.GetAllCachedBidsAsync fehlgeschlagen");
+            return new HashSet<string>();
+        }
+    }
+
+    /// <summary>
     /// Ein Kurs gilt als vollständig (und damit cache-würdig), wenn er mind. ein Kapitel hat
     /// und KEIN Kapitel/keine Linie leeren bzw. <c>{}</c>-Roh-Content trägt. Ein Teil-Fetch
     /// (z.B. Linie nach 10 erfolglosen Retries als "" abgelegt) darf NICHT gecacht werden —
