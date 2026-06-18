@@ -174,8 +174,10 @@ namespace piratechess_lib
                     pendingVariations = "";
                 }
 
-                var arrowList = move.Draws.Where(x => x.Object == "arrow").ToList();
-                var circleList = move.Draws.Where(x => x.Object == "circle").ToList();
+                // Chessable kann "draws": null bzw. einzelne null-Eintraege liefern; das Property-Pattern
+                // filtert null-Elemente mit aus (NullRef in GeneratePGN, bid 282212).
+                var arrowList = move.Draws?.Where(x => x is { Object: "arrow" }).ToList() ?? [];
+                var circleList = move.Draws?.Where(x => x is { Object: "circle" }).ToList() ?? [];
 
                 string annotation = "";
 
@@ -185,7 +187,7 @@ namespace piratechess_lib
                     var firstrun = true;
                     foreach (JsonDraw draw in arrowList)
                     {
-                        annotation += $"{(firstrun ? "" : ",")}{draw.Color.ToUpper()}{draw.Start}{draw.End}";
+                        annotation += $"{(firstrun ? "" : ",")}{(draw.Color ?? "").ToUpper()}{draw.Start}{draw.End}";
                         firstrun = false;
                     }
                     annotation += "]";
@@ -197,7 +199,7 @@ namespace piratechess_lib
                     var firstrun = true;
                     foreach (JsonDraw draw in circleList)
                     {
-                        annotation += $"{(firstrun ? "" : ",")}{draw.Color.ToUpper()}{draw.Start}";
+                        annotation += $"{(firstrun ? "" : ",")}{(draw.Color ?? "").ToUpper()}{draw.Start}";
                         firstrun = false;
                     }
                     annotation += "]";

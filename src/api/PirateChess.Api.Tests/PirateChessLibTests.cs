@@ -75,4 +75,41 @@ public class PirateChessLibTests
         Assert.Null(ex);
         Assert.Equal(1, lib.ErrorCount); // korrupte Linie übersprungen statt Crash
     }
+
+    // Regression (prod, bid 282212): Chessable lieferte in "draws" einen null-Eintrag; die
+    // .Where(x => x.Object == ...)-Lambda dereferenzierte ihn → NullReferenceException in
+    // GeneratePGN ließ den ganzen Kurs-Abruf scheitern.
+    [Fact]
+    public void GeneratePGN_NullDrawEntry_IgnoredNotThrow()
+    {
+        var game = new Game
+        {
+            Data =
+            [
+                new JsonMove
+                {
+                    Id = 1, Move = 1, San = "e4",
+                    Draws = [ null!, new JsonDraw { Object = "arrow", Color = "green", Start = "e2", End = "e4" } ],
+                },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Contains("e4", pgn);
+        Assert.Contains("%cal", pgn);   // der gültige Pfeil bleibt erhalten
+    }
+
+    [Fact]
+    public void GeneratePGN_NullDrawsList_IgnoredNotThrow()
+    {
+        var game = new Game
+        {
+            Data = [ new JsonMove { Id = 1, Move = 1, San = "e4", Draws = null! } ],
+        };
+
+        var ex = Record.Exception(() => game.GeneratePGN(noTrainingMove: true));
+
+        Assert.Null(ex);
+    }
 }
