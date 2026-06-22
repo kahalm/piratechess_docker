@@ -193,15 +193,16 @@ public class ChessableController : ControllerBase
         string? maskedEmail = null;
         string? maskedPassword = null;
 
+        // Robust gegen Key-Rotation/korrupte Daten: kein 500, nur keine Maske (Re-Eingabe nötig).
         if (cred.EncryptedBearer is not null)
         {
-            var plain = _encryption.Decrypt(cred.EncryptedBearer);
-            maskedBearer = Mask(plain);
+            var plain = _encryption.TryDecrypt(cred.EncryptedBearer);
+            maskedBearer = plain is null ? null : Mask(plain);
         }
         if (cred.EncryptedEmail is not null)
         {
-            var plain = _encryption.Decrypt(cred.EncryptedEmail);
-            maskedEmail = MaskEmail(plain);
+            var plain = _encryption.TryDecrypt(cred.EncryptedEmail);
+            maskedEmail = plain is null ? null : MaskEmail(plain);
         }
         if (cred.EncryptedPassword is not null)
         {

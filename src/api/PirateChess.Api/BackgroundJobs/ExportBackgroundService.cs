@@ -75,7 +75,13 @@ public class ExportBackgroundService : BackgroundService
 
         if (cred.UseBearer && cred.EncryptedBearer is not null)
         {
-            bearer = encryption.Decrypt(cred.EncryptedBearer);
+            var decrypted = encryption.TryDecrypt(cred.EncryptedBearer);
+            if (decrypted is null)
+            {
+                await FailExportAsync(job, "Stored bearer could not be decrypted — please re-enter credentials");
+                return;
+            }
+            bearer = decrypted;
             var (extractedUid, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
             if (uidError is not null)
             {
@@ -86,8 +92,13 @@ public class ExportBackgroundService : BackgroundService
         }
         else if (!cred.UseBearer && cred.EncryptedEmail is not null && cred.EncryptedPassword is not null)
         {
-            var email = encryption.Decrypt(cred.EncryptedEmail);
-            var password = encryption.Decrypt(cred.EncryptedPassword);
+            var email = encryption.TryDecrypt(cred.EncryptedEmail);
+            var password = encryption.TryDecrypt(cred.EncryptedPassword);
+            if (email is null || password is null)
+            {
+                await FailExportAsync(job, "Stored credentials could not be decrypted — please re-enter them");
+                return;
+            }
             var (jwt, loginError) = await _chessableHttp.LoginAsync(email, password, ct);
             if (loginError is not null)
             {
