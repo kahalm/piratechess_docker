@@ -132,6 +132,13 @@ builder.Services.AddHttpClient(VpnRotationService.ClientName, client =>
         PooledConnectionIdleTimeout = TimeSpan.FromSeconds(1),
     });
 
+// Proxied HttpClient ("Chessable") für den gluetun-Proxy (:8888). Wird von
+// VpnRotationService.WaitForProxyReadyAsync (Readiness-Probe nach Rotation) UND
+// VpnController (IP-Status-Fallback) genutzt. OHNE diese Registrierung liefert
+// CreateClient("Chessable") einen Default-Client OHNE Proxy → Probe/Status liefen
+// mit der Host-IP am Tunnel vorbei (Probe wirkungslos, Status meldet Host-IP).
+builder.Services.AddChessableHttpClient(builder.Configuration);
+
 // VPN-IP-Rotation (gluetun) — teilt sich denselben gluetun wie der Crawler.
 builder.Services.AddSingleton<IVpnRotationService, VpnRotationService>();
 
