@@ -159,6 +159,12 @@ public class ChessableHttpService : IChessableHttpService
         if (string.IsNullOrWhiteSpace(content) || content == "{}")
             return (null, "Empty response from Chessable");
 
+        // Chessable antwortet bei abgelaufenem/ungültigem Bearer mit HTTP 200, aber einem
+        // Fehler-Body {"error":{"message":"Expired token"}}. Ohne diese Erkennung würde der Body
+        // als (leere) Kursliste durchgehen → der User sähe „keine Kurse" statt der echten Ursache.
+        if (TryGetChessableErrorMessage(content) is { } apiError)
+            return (null, apiError);
+
         try
         {
             var response = JsonSerializer.Deserialize<ResponseChapterList>(content, JsonOpts)
@@ -171,6 +177,34 @@ public class ChessableHttpService : IChessableHttpService
         catch (Exception ex)
         {
             return (null, ex.Message);
+        }
+    }
+
+    /// <summary>Erkennt einen Chessable-Fehler-Body (z. B. <c>{"error":{"message":"Expired token"}}</c>
+    /// oder <c>{"error":"…"}</c>) und liefert eine sprechende Meldung; sonst <c>null</c>.</summary>
+    public static string? TryGetChessableErrorMessage(string content)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(content);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object ||
+                !doc.RootElement.TryGetProperty("error", out var err))
+                return null;
+            var message = err.ValueKind switch
+            {
+                JsonValueKind.String => err.GetString(),
+                JsonValueKind.Object when err.TryGetProperty("message", out var m) => m.GetString(),
+                _ => null,
+            };
+            if (string.IsNullOrWhiteSpace(message)) return null;
+            // „Expired token" / „Invalid token" → eindeutiger Hinweis auf einen neuen Bearer.
+            return message.Contains("token", StringComparison.OrdinalIgnoreCase)
+                ? $"Chessable-Token abgelaufen/ungültig ({message}) — bitte den Bearer neu hinterlegen."
+                : $"Chessable: {message}";
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 

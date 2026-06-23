@@ -40,6 +40,38 @@ public class ChessableHttpServiceTests
         Assert.False(ChessableHttpService.IsTransientProxyFailure(exitCode, stderr));
     }
 
+    // --- Chessable-Fehler-Body trotz HTTP 200 (Fix: abgelaufener Bearer → „keine Kurse") ---
+
+    [Fact]
+    public void TryGetChessableErrorMessage_ExpiredToken_ReturnsHint()
+    {
+        // Exakt der beobachtete Body aus ChessableRawResponses bei abgelaufenem Bearer.
+        const string body = "{\"error\":{\"message\":\"Expired token\"}}";
+        var msg = ChessableHttpService.TryGetChessableErrorMessage(body);
+        Assert.NotNull(msg);
+        Assert.Contains("Expired token", msg);
+        Assert.Contains("neu hinterlegen", msg); // Hinweis auf neuen Bearer
+    }
+
+    [Theory]
+    [InlineData("{\"error\":\"Something went wrong\"}")]            // error als String
+    [InlineData("{\"error\":{\"message\":\"Invalid request\"}}")]   // error.message ohne „token"
+    public void TryGetChessableErrorMessage_GenericError_ReturnsMessage(string body)
+    {
+        var msg = ChessableHttpService.TryGetChessableErrorMessage(body);
+        Assert.NotNull(msg);
+        Assert.StartsWith("Chessable:", msg);
+    }
+
+    [Theory]
+    [InlineData("{\"homeData\":{\"booksList\":[]}}")] // gültige (leere) Kursliste → kein Fehler
+    [InlineData("{}")]
+    [InlineData("not json")]
+    public void TryGetChessableErrorMessage_NoError_ReturnsNull(string body)
+    {
+        Assert.Null(ChessableHttpService.TryGetChessableErrorMessage(body));
+    }
+
     // --- curl-Arg-Injektion (Fix HIGH: bid/url floss vorher als "{url}" in einen Args-String) ---
 
     [Fact]
