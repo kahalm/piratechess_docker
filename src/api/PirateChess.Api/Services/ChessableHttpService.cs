@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Serilog.Context;
 using piratechess_lib;
@@ -599,7 +600,8 @@ public class ChessableHttpService : IChessableHttpService
                 // gzip+Base64: die Roh-Bodies (Linien Ø ~210 KB, Kapitel Ø ~500 KB) waren bisher
                 // unkomprimiert der mit Abstand größte Tabellen-Anteil. Niemand liest RawJson im Code
                 // (reines Audit/Debug) → Kompression ist verhaltensneutral, ~3× kleiner.
-                RawJson = GzipText.Compress(body ?? string.Empty),
+                // Login-Antworten enthalten ein frisches Chessable-JWT → vor dem Speichern redigieren.
+                RawJson = GzipText.Compress(RedactForStorage(endpoint, body ?? string.Empty)),
                 DurationMs = durationMs,
                 ErrorMessage = errorMessage,
                 RequestedAt = DateTime.UtcNow
@@ -611,6 +613,16 @@ public class ChessableHttpService : IChessableHttpService
             // Logging-Persistenz darf den eigentlichen Call nicht killen.
             _logger.LogWarning(ex, "Failed to persist ChessableRawResponse for {Endpoint}", endpoint);
         }
+    }
+
+    /// <summary>Redigiert sensible Werte aus einem Roh-Body vor dem Audit-Speichern. Aktuell: das
+    /// <c>jwt</c>-Feld der Login-Antwort (frisches Chessable-Token) → <c>[redacted]</c>. Andere
+    /// Endpunkte bleiben unverändert (reine Kurs-/Linien-Daten, kein Geheimnis).</summary>
+    internal static string RedactForStorage(string endpoint, string body)
+    {
+        if (endpoint != "login" || string.IsNullOrEmpty(body)) return body;
+        // "jwt":"<token>" → "jwt":"[redacted]" (tolerant ggü. Whitespace; Token enthält keine ").
+        return Regex.Replace(body, "(\"jwt\"\\s*:\\s*\")[^\"]*(\")", "$1[redacted]$2");
     }
 
     private static void AddHeader(List<string> args, string header)
