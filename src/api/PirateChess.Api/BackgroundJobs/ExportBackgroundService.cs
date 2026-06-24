@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Serilog.Context;
 using PirateChess.Api.Data;
 using PirateChess.Api.Hubs;
 using PirateChess.Api.Models.DTOs;
@@ -42,6 +43,9 @@ public class ExportBackgroundService : BackgroundService
 
         await foreach (var job in _queue.DequeueAllAsync(stoppingToken))
         {
+            // Den kompletten Kurs-Import (Persistieren + Erfolg/Fehler) für die zentrale
+            // Kibana-Filterung mit dem Domänen-Tag versehen → ECS `tags`.
+            using var _tagScope = LogContext.PushProperty("LogTags", "chessable,import");
             try
             {
                 await ProcessExportAsync(job, stoppingToken);

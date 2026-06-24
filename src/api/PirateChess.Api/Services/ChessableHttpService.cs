@@ -216,6 +216,10 @@ public class ChessableHttpService : IChessableHttpService
         Action<string>? onRetry = null,
         CancellationToken ct = default)
     {
+        // Alle Lifecycle-Logs dieses Scrapes (Retries/Warnungen/Per-Request) für die
+        // zentrale Kibana-Filterung mit dem Domänen-Tag versehen → ECS `tags`.
+        using var _tagScope = LogContext.PushProperty("LogTags", "chessable,scrape");
+
         // 1. Fetch course structure — der gluetun-Proxy liefert direkt nach einer
         //    VPN-Rotation kurz 503 (CONNECT tunnel failed). Anders als der Line-Fetch
         //    hatte dieser Aufruf bisher keinen Retry → ein einziges 503 ließ den

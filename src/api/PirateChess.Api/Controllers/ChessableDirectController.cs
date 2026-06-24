@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Serilog.Context;
 using PirateChess.Api.Authorization;
 using PirateChess.Api.Models.DTOs;
 using PirateChess.Api.Services;
@@ -211,6 +212,8 @@ public class ChessableDirectController : ControllerBase
     {
         var job = _jobStore.Get(jobId);
         if (job is null) return;
+        // Lifecycle-Logs dieses Fetch-Jobs für die zentrale Kibana-Filterung taggen → ECS `tags`.
+        using var _tagScope = LogContext.PushProperty("LogTags", "chessable,scrape");
         try
         {
             // Rohdaten aus dem (kurs-/bid-weiten) Cache wiederverwenden → kein Chessable-Call,
