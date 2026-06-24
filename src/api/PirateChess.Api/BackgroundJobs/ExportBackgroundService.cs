@@ -144,7 +144,7 @@ public class ExportBackgroundService : BackgroundService
                 var msg = new ExportProgressMessage(
                     job.ExportId, "Chapter", $"Chapter {counter}",
                     chaptersDone, chaptersTotal, linesDone);
-                _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+                NotifyProgress(userGroup, msg);
             },
             onCumulativeLines: total =>
             {
@@ -153,14 +153,14 @@ public class ExportBackgroundService : BackgroundService
                 var msg = new ExportProgressMessage(
                     job.ExportId, "Line", $"Lines: {total}",
                     chaptersDone, chaptersTotal, linesDone);
-                _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+                NotifyProgress(userGroup, msg);
             },
             onRetry: retryMsg =>
             {
                 var msg = new ExportProgressMessage(
                     job.ExportId, "Retry", retryMsg,
                     chaptersDone, chaptersTotal, linesDone);
-                _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+                NotifyProgress(userGroup, msg);
             },
             ct: ct);
 
@@ -203,7 +203,7 @@ public class ExportBackgroundService : BackgroundService
             var msg = new ExportProgressMessage(
                 job.ExportId, "PGN", $"Generating PGN: Chapter {counter}",
                 chaptersDone, chaptersTotal, linesDone);
-            _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+            NotifyProgress(userGroup, msg);
         });
 
         lib.SetCumulativeLinesEvent(total =>
@@ -213,7 +213,7 @@ public class ExportBackgroundService : BackgroundService
             var msg = new ExportProgressMessage(
                 job.ExportId, "PGN", $"Generating PGN: Lines {total}",
                 chaptersDone, chaptersTotal, linesDone);
-            _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg).Wait();
+            NotifyProgress(userGroup, msg);
         });
 
         var (pgn, courseName) = await Task.Run(() => lib.GetCourse(job.ChessableBid, useLocalData: true), ct);
@@ -327,5 +327,18 @@ public class ExportBackgroundService : BackgroundService
         {
             _logger.LogError(ex, "Failed to update export status for {ExportId}", job.ExportId);
         }
+    }
+
+    /// <summary>
+    /// Sendet eine (rein informative) Fortschrittsmeldung an die SignalR-Gruppe — fire-and-forget,
+    /// damit der synchrone piratechess_lib-Callback NICHT durch <c>SendAsync().Wait()</c> blockiert
+    /// (sync-over-async). Ein Sendefehler wird beobachtet+geloggt (keine unobserved Task-Exception).
+    /// </summary>
+    private void NotifyProgress(string userGroup, ExportProgressMessage msg)
+    {
+        _ = _hub.Clients.Group(userGroup).SendAsync("ExportProgress", msg)
+            .ContinueWith(
+                t => _logger.LogDebug(t.Exception, "ExportProgress send failed for {ExportId}", msg.ExportId),
+                TaskContinuationOptions.OnlyOnFaulted);
     }
 }
