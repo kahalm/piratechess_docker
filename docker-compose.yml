@@ -68,6 +68,10 @@ services:
       # gluetun-Control-Server für die IP-Rotation (un-proxied). Leer lassen
       # deaktiviert die Rotation. Default: alle 20 Requests (Vpn__RotateAfterRequests).
       Gluetun__ControlUrl: ${GLUETUN_CONTROL_URL:-http://gluetun:8000}
+      # Optionaler API-Key für den gluetun-Control-Server. Leer lassen → kein
+      # X-API-Key-Header (auth="none" in gluetun-auth.toml bleibt kompatibel).
+      # Nur setzen, wenn gluetun-auth.toml auf auth="apikey" steht.
+      Gluetun__ApiKey: ${GLUETUN_APIKEY:-}
       Vpn__RotateAfterRequests: ${VPN_ROTATE_AFTER_REQUESTS:-20}
       # Strukturierte Logs (Serilog) gehen ins selbe Elasticsearch wie rookhub
       # → eigener Index `piratechess-logs-*`. URL leer lassen deaktiviert den

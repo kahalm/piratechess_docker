@@ -8,15 +8,20 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      VPN_SERVICE_PROVIDER: ${VPN_PROVIDER:-airvpn}
-      VPN_TYPE: ${VPN_TYPE:-wireguard}
+      VPN_SERVICE_PROVIDER: ${VPN_PROVIDER}
+      VPN_TYPE: ${VPN_TYPE}
       WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
       WIREGUARD_PRESHARED_KEY: ${WIREGUARD_PRESHARED_KEY}
       WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES}
-      SERVER_COUNTRIES: ${VPN_SERVER_COUNTRIES:-Netherlands}
+      SERVER_COUNTRIES: ${VPN_SERVER_COUNTRIES}
       HTTPPROXY: "on"
+      # Control-Server (:8000) für piratechess-api erreichbar machen → IP-Rotation.
+      # 8888 = HTTP-Proxy muss mit aufgeführt bleiben.
+      FIREWALL_INPUT_PORTS: "8888,8000"
     volumes:
       - gluetun_data:/gluetun
+      # Control-Server-Auth: gibt die Rotations-Routen frei (gluetun latest verlangt sonst Auth → "Unauthorized")
+      - ./gluetun-auth.toml:/gluetun/auth/config.toml:ro
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
       interval: 10s
@@ -33,10 +38,14 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    ports:
-      - "3308:3306"
+    # Kein Host-Port-Mapping in Prod: die DB ist nur intern (api-Container im
+    # selben Compose-Netz) erreichbar. Für ad-hoc-Zugriff bei Bedarf temporär
+    # `docker compose exec db ...` nutzen statt den Port dauerhaft zu exponieren.
+    expose:
+      - "3306"
     volumes:
       - db_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -49,13 +58,29 @@ services:
     container_name: piratechess-api
     restart: unless-stopped
     environment:
-      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
       ConnectionStrings__DefaultConnection: ${CONNECTION_STRING}
       Jwt__Secret: ${JWT_SECRET}
       Jwt__Issuer: ${JWT_ISSUER}
       Jwt__Audience: ${JWT_AUDIENCE}
       Encryption__Key: ${ENCRYPTION_KEY}
+      # Service-to-service Key für Inter-Stack-Calls (rookhub → /api/chessable/direct/*).
+      # Fehlt er, sind die /direct/*-Endpoints fail-closed (503/401).
+      Service__ApiKey: ${SERVICE_API_KEY}
       Chessable__ProxyUrl: http://gluetun:8888
+      # gluetun-Control-Server für die IP-Rotation (un-proxied). Leer lassen
+      # deaktiviert die Rotation.
+      Gluetun__ControlUrl: ${GLUETUN_CONTROL_URL}
+      # Optionaler API-Key für den gluetun-Control-Server. Nur setzen, WENN
+      # gluetun-auth.toml auf auth="apikey" steht (sonst leer lassen → kein Header,
+      # auth="none" bleibt kompatibel). gluetun + api dann ZUSAMMEN neu starten.
+      Gluetun__ApiKey: ${GLUETUN_APIKEY}
+      Vpn__RotateAfterRequests: ${VPN_ROTATE_AFTER_REQUESTS}
+      # Strukturierte Logs (Serilog) gehen ins selbe Elasticsearch wie rookhub
+      # → eigener Index `piratechess-logs-*`. URL leer lassen deaktiviert den
+      # ES-Sink (Console-Logger bleibt aktiv).
+      Elasticsearch__Url: ${ELASTICSEARCH_URL}
+      Elasticsearch__IndexFormat: ${ELASTICSEARCH_INDEX_FORMAT}
     ports:
       - "5000:8080"
     depends_on:
@@ -63,7 +88,17 @@ services:
         condition: service_healthy
       gluetun:
         condition: service_healthy
+    networks:
+      - default
+      - chessable-bridge
 
 volumes:
   db_data:
   gluetun_data:
+
+networks:
+  # Inter-stack bridge so rookhub-api can reach piratechess-api by its
+  # container name. The network is named explicitly (not project-prefixed)
+  # so other compose projects can join it as `external: true`.
+  chessable-bridge:
+    name: chessable-bridge
