@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using PirateChess.Api.Authorization;
 using PirateChess.Api.Services;
 
 namespace PirateChess.Api.Controllers;
@@ -17,6 +18,9 @@ public class VpnController : ControllerBase
         _vpn = vpn;
     }
 
+    // Liefert die reale VPN-Exit-IP → nicht unauthentifiziert preisgeben (Service-zu-Service-Auth,
+    // analog zu /api/chessable/direct/*). POST /rotate bleibt JWT-geschützt.
+    [ServiceKeyAuth]
     [HttpGet("status")]
     public async Task<IActionResult> GetStatus(CancellationToken ct)
     {
