@@ -92,6 +92,10 @@ public class RawCourseCache
     /// am seriellen Pfad vorbei → mehrere Kurse zögen parallel über dieselbe VPN-IP.
     /// (Lädt/dekomprimiert die Rohdaten — passiert nur einmal pro Import-Start, kein Hot-Path.)
     /// </summary>
+    // ExistsAsync nutzt BEWUSST GetAsync (lädt+dekomprimiert+prüft Vollständigkeit + heilt einen
+    // truncated Cache), NICHT ein billiges AnyAsync: ein unvollständiger Cache darf NICHT als
+    // „cached" gelten (sonst überspringt der Import den nötigen Re-Fetch). Siehe Test
+    // ExistsAsync_TruncatedCachedCourse_False_AndDeleted + Parallel-Lauf-Fix.
     public async Task<bool> ExistsAsync(string bid, CancellationToken ct = default)
         => await GetAsync(bid, ct) is not null;
 
