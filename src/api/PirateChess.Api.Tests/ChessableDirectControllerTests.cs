@@ -43,6 +43,19 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
+    public async Task Test_MultipleServiceKeyHeaders_Returns401()
+    {
+        var client = _factory.CreateClient();
+        // Zwei X-Service-Key-Header (einer gültig) → abgelehnt (Count != 1).
+        client.DefaultRequestHeaders.Add(ServiceKeyHeader, ValidServiceKey);
+        client.DefaultRequestHeaders.Add(ServiceKeyHeader, "extra");
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/test", new { Bearer = "some-jwt" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Test_ValidBearer_ReturnsUidAndCourseCount()
     {
         var client = ClientWithServiceKey();

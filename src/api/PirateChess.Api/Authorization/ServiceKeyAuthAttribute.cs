@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 
@@ -27,8 +29,10 @@ public class ServiceKeyAuthAttribute : Attribute, IAsyncActionFilter
             return;
         }
 
-        if (!context.HttpContext.Request.Headers.TryGetValue(HeaderName, out var provided)
-            || !string.Equals(provided.ToString(), expected, StringComparison.Ordinal))
+        // Genau EIN Header-Wert erwartet (mehrere → verdächtig/ungültig), danach zeitkonstanter
+        // Vergleich, damit die Antwortzeit den Key nicht zeichenweise verrät (Timing-Angriff).
+        var header = context.HttpContext.Request.Headers[HeaderName];
+        if (header.Count != 1 || !FixedTimeEquals(header.ToString(), expected))
         {
             context.Result = new UnauthorizedObjectResult(new { message = "Invalid service key" });
             return;
@@ -36,4 +40,9 @@ public class ServiceKeyAuthAttribute : Attribute, IAsyncActionFilter
 
         await next();
     }
+
+    /// <summary>Zeitkonstanter String-Vergleich (verhindert Längen-/Inhalts-Leak über Timing).</summary>
+    private static bool FixedTimeEquals(string a, string b)
+        => CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 }
