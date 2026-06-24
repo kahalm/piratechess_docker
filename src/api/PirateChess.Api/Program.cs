@@ -193,6 +193,11 @@ app.Use(async (ctx, next) =>
             scopes.Add(LogContext.PushProperty("UserName", ctx.User.Identity.Name));
     }
     try { await next(); }
+    catch (UnauthorizedAccessException) when (!ctx.Response.HasStarted)
+    {
+        // Fehlender/ungültiger User-Id-Claim (s. ClaimsPrincipalExtensions.GetRequiredUserId) → 401 statt 500.
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+    }
     finally { for (var i = scopes.Count - 1; i >= 0; i--) scopes[i].Dispose(); }
 });
 

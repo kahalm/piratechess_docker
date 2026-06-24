@@ -1,7 +1,7 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using PirateChess.Api.Authorization;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.DTOs;
 using PirateChess.Api.Models.Entities;
@@ -25,7 +25,7 @@ public class ChessableController : ControllerBase
         _chessableHttp = chessableHttp;
     }
 
-    private int UserId => int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    private int UserId => User.GetRequiredUserId();
 
     [HttpGet("credentials")]
     public async Task<IActionResult> GetCredentials()

@@ -1,7 +1,7 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using PirateChess.Api.Authorization;
 using PirateChess.Api.BackgroundJobs;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.DTOs;
@@ -23,7 +23,7 @@ public class ExportController : ControllerBase
         _jobQueue = jobQueue;
     }
 
-    private int UserId => int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    private int UserId => User.GetRequiredUserId();
 
     [HttpPost]
     public async Task<IActionResult> StartExport(StartExportRequest request)
