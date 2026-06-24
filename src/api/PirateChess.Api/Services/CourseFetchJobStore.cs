@@ -8,6 +8,11 @@ namespace PirateChess.Api.Services;
 /// </summary>
 public class CourseFetchJob
 {
+    /// <summary>Anlage-Zeitpunkt (für TTL/Reaping im <see cref="CourseFetchJobStore"/>). internal set nur für Tests.</summary>
+    public DateTime CreatedAt { get; internal set; } = DateTime.UtcNow;
+    /// <summary>Zeitpunkt des Übergangs auf completed/failed (für die kürzere Terminal-TTL). internal set nur für Tests.</summary>
+    public DateTime? TerminalAt { get; internal set; }
+
     public string Status { get; set; } = "running"; // running | completed | failed
     public int ChaptersDone { get; set; }
     public int ChaptersTotal { get; set; }
@@ -34,6 +39,7 @@ public class CourseFetchJob
             ChapterCount = chapterCount;
             LineCount = lineCount;
             Status = "completed";
+            TerminalAt = DateTime.UtcNow;
         }
     }
 
@@ -44,6 +50,7 @@ public class CourseFetchJob
         {
             Error = error;
             Status = "failed";
+            TerminalAt = DateTime.UtcNow;
         }
     }
 
@@ -58,10 +65,19 @@ public class CourseFetchJob
 /// <summary>Hält laufende/fertige Kurs-Abruf-Jobs im Speicher, je per Job-Id.</summary>
 public class CourseFetchJobStore
 {
+    /// <summary>Terminale (completed/failed) Jobs werden so lange aufbewahrt, dass ein normaler
+    /// rookhub-Poll das Ergebnis (PGN) noch abholen kann; danach freigegeben.</summary>
+    public static readonly TimeSpan TerminalTtl = TimeSpan.FromMinutes(30);
+    /// <summary>Harte Obergrenze für JEDEN Job (auch „running") gegen steckengebliebene/verwaiste Einträge.</summary>
+    public static readonly TimeSpan MaxJobAge = TimeSpan.FromHours(6);
+    /// <summary>Notbremse: nie mehr als so viele Jobs halten (ältester terminaler zuerst raus).</summary>
+    public const int MaxJobs = 500;
+
     private readonly ConcurrentDictionary<string, CourseFetchJob> _jobs = new();
 
     public CourseFetchJob Create(string id)
     {
+        Prune(DateTime.UtcNow);   // Lazy-Reaping: jeder neue Job räumt verwaiste/alte Einträge ab.
         var job = new CourseFetchJob();
         _jobs[id] = job;
         return job;
@@ -70,4 +86,40 @@ public class CourseFetchJobStore
     public CourseFetchJob? Get(string id) => _jobs.TryGetValue(id, out var job) ? job : null;
 
     public void Remove(string id) => _jobs.TryRemove(id, out _);
+
+    public int Count => _jobs.Count;
+
+    /// <summary>
+    /// Entfernt verwaiste Jobs: terminale älter als <see cref="TerminalTtl"/>, JEDEN älter als
+    /// <see cref="MaxJobAge"/>, und — falls weiterhin über <see cref="MaxJobs"/> — die ältesten
+    /// (terminale zuerst), bis das Limit eingehalten ist. Gibt die Anzahl entfernter Jobs zurück.
+    /// <paramref name="nowUtc"/> ist Parameter (testbar ohne Wall-Clock).
+    /// </summary>
+    public int Prune(DateTime nowUtc)
+    {
+        var removed = 0;
+        foreach (var (id, job) in _jobs)
+        {
+            var snap = job.Snapshot();
+            var terminal = snap.Status is "completed" or "failed";
+            var tooOld = nowUtc - job.CreatedAt > MaxJobAge;
+            var terminalExpired = terminal && job.TerminalAt is { } t && nowUtc - t > TerminalTtl;
+            if ((tooOld || terminalExpired) && _jobs.TryRemove(id, out _)) removed++;
+        }
+
+        if (_jobs.Count > MaxJobs)
+        {
+            // Ältester zuerst, terminale vor laufenden (laufende möglichst nicht abwürgen).
+            var overflow = _jobs
+                .OrderByDescending(kv => kv.Value.Snapshot().Status is "completed" or "failed")
+                .ThenBy(kv => kv.Value.CreatedAt)
+                .Take(_jobs.Count - MaxJobs)
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var id in overflow)
+                if (_jobs.TryRemove(id, out _)) removed++;
+        }
+
+        return removed;
+    }
 }
