@@ -479,6 +479,15 @@ public class ChessableHttpService : IChessableHttpService
             using var process = Process.Start(psi)
                 ?? throw new InvalidOperationException($"Failed to start {_curlPath}");
 
+            // Bei Cancellation (z. B. Shutdown) den curl-Prozess aktiv beenden — Process.Dispose
+            // killt ihn NICHT, sonst bliebe er als Waise hängen und WaitForExitAsync würde erst
+            // mit seinem Ende zurückkehren.
+            using var killReg = ct.Register(() =>
+            {
+                try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+                catch { /* Prozess bereits beendet / Race — egal */ }
+            });
+
             if (stdinBody is not null)
             {
                 await process.StandardInput.WriteAsync(stdinBody.AsMemory(), ct);
