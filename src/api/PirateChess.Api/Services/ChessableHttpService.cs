@@ -166,6 +166,13 @@ public class ChessableHttpService : IChessableHttpService
         if (TryGetChessableErrorMessage(content) is { } apiError)
             return (null, apiError);
 
+        // Bei abgelaufenem Bearer / Cloudflare-Block / Proxy-Gateway-Fehler kommt statt JSON
+        // eine HTML-Seite zurück (beginnt mit '<'). JsonSerializer.Deserialize würde damit mit
+        // „'<' is an invalid start of a value" crashen und genau dieser kryptische Parser-Text
+        // wurde als Fehler bis in die rookhub-UI durchgereicht (sah aus wie ein „Syntaxfehler").
+        if (LooksLikeHtml(content))
+            return (null, "Chessable lieferte eine HTML-Seite statt JSON (Token abgelaufen/ungültig oder Zugriff blockiert) — bitte den Bearer neu hinterlegen.");
+
         try
         {
             var response = JsonSerializer.Deserialize<ResponseChapterList>(content, JsonOpts)
@@ -175,10 +182,30 @@ public class ChessableHttpService : IChessableHttpService
                 courses.Add(book.Bid.ToString(), book.Name);
             return (courses, null);
         }
+        catch (JsonException)
+        {
+            // Defensive Auffanglinie: irgendein anderer nicht-erwarteter Body (kein JSON,
+            // keine HTML-Seite). Kryptischen Parser-Text NICHT weiterreichen.
+            return (null, "Chessable lieferte eine unerwartete Antwort (kein gültiges JSON) — bitte den Bearer neu hinterlegen.");
+        }
         catch (Exception ex)
         {
             return (null, ex.Message);
         }
+    }
+
+    /// <summary>True, wenn der Body offensichtlich HTML/XML statt JSON ist (erstes
+    /// Nicht-Whitespace-Zeichen ist <c>&lt;</c>) — typisch für Login-Redirects,
+    /// Cloudflare-Block- oder Proxy-Gateway-Seiten.</summary>
+    internal static bool LooksLikeHtml(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return false;
+        foreach (var c in content)
+        {
+            if (char.IsWhiteSpace(c)) continue;
+            return c == '<';
+        }
+        return false;
     }
 
     /// <summary>Erkennt einen Chessable-Fehler-Body (z. B. <c>{"error":{"message":"Expired token"}}</c>
@@ -264,6 +291,13 @@ public class ChessableHttpService : IChessableHttpService
 
         if (string.IsNullOrWhiteSpace(courseContent) || courseContent == "{}")
             return (null, "Empty course response");
+
+        // Abgelaufener Bearer-Fehler-Body bzw. HTML-Seite (Token/Cloudflare/Proxy) → sprechende
+        // Meldung statt „Failed to parse course JSON" bzw. dem rohen JSON-Parser-Text.
+        if (TryGetChessableErrorMessage(courseContent) is { } courseApiError)
+            return (null, courseApiError);
+        if (LooksLikeHtml(courseContent))
+            return (null, "Chessable lieferte eine HTML-Seite statt JSON (Token abgelaufen/ungültig oder Zugriff blockiert) — bitte den Bearer neu hinterlegen.");
 
         ResponseCourse? course;
         try

@@ -72,6 +72,27 @@ public class ChessableHttpServiceTests
         Assert.Null(ChessableHttpService.TryGetChessableErrorMessage(body));
     }
 
+    // --- HTML-statt-JSON-Antwort (Fix: „'<' is an invalid start of a value" leakte in die UI) ---
+
+    [Theory]
+    [InlineData("<!DOCTYPE html><html><head><title>Login</title></head></html>")]
+    [InlineData("   \n <html>blocked</html>")]                 // führende Whitespaces ignoriert
+    [InlineData("<?xml version=\"1.0\"?><error/>")]
+    public void LooksLikeHtml_HtmlBody_ReturnsTrue(string body)
+    {
+        Assert.True(ChessableHttpService.LooksLikeHtml(body));
+    }
+
+    [Theory]
+    [InlineData("{\"homeData\":{\"booksList\":[]}}")]          // echtes JSON-Objekt
+    [InlineData("  [1,2,3]")]                                   // JSON-Array (mit Whitespace)
+    [InlineData("")]
+    [InlineData("   ")]
+    public void LooksLikeHtml_NonHtmlBody_ReturnsFalse(string body)
+    {
+        Assert.False(ChessableHttpService.LooksLikeHtml(body));
+    }
+
     // --- curl-Arg-Injektion (Fix HIGH: bid/url floss vorher als "{url}" in einen Args-String) ---
 
     [Fact]
