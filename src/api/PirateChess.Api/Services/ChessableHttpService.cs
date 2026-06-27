@@ -170,8 +170,9 @@ public class ChessableHttpService : IChessableHttpService
         // eine HTML-Seite zurück (beginnt mit '<'). JsonSerializer.Deserialize würde damit mit
         // „'<' is an invalid start of a value" crashen und genau dieser kryptische Parser-Text
         // wurde als Fehler bis in die rookhub-UI durchgereicht (sah aus wie ein „Syntaxfehler").
+        // Klassifizieren: Token abgelaufen vs. (vermutlich VPN-IP) durch Cloudflare blockiert.
         if (LooksLikeHtml(content))
-            return (null, "Chessable lieferte eine HTML-Seite statt JSON (Token abgelaufen/ungültig oder Zugriff blockiert) — bitte den Bearer neu hinterlegen.");
+            return (null, ClassifyBlockedResponse(content, bearer));
 
         try
         {
@@ -186,7 +187,7 @@ public class ChessableHttpService : IChessableHttpService
         {
             // Defensive Auffanglinie: irgendein anderer nicht-erwarteter Body (kein JSON,
             // keine HTML-Seite). Kryptischen Parser-Text NICHT weiterreichen.
-            return (null, "Chessable lieferte eine unerwartete Antwort (kein gültiges JSON) — bitte den Bearer neu hinterlegen.");
+            return (null, ClassifyBlockedResponse(content, bearer));
         }
         catch (Exception ex)
         {
@@ -206,6 +207,51 @@ public class ChessableHttpService : IChessableHttpService
             return c == '<';
         }
         return false;
+    }
+
+    /// <summary>True, wenn der Body eine Cloudflare-Block-/Challenge-Seite ist
+    /// (HTTP 403 „you have been blocked" / „Attention Required" / Ray-ID).</summary>
+    internal static bool IsCloudflareBlockPage(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return false;
+        return (content.Contains("cloudflare", StringComparison.OrdinalIgnoreCase)
+                && (content.Contains("Ray ID", StringComparison.OrdinalIgnoreCase)
+                    || content.Contains("cf-ray", StringComparison.OrdinalIgnoreCase)))
+            || content.Contains("Attention Required", StringComparison.OrdinalIgnoreCase)
+            || content.Contains("you have been blocked", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Übersetzt eine Nicht-JSON-/Block-Antwort in eine handlungsleitende Meldung und unterscheidet
+    /// dabei die beiden grundverschiedenen Ursachen:
+    /// <list type="bullet">
+    /// <item><b>Token abgelaufen/ungültig</b> → der User muss einen neuen Bearer hinterlegen.</item>
+    /// <item><b>Zugriff blockiert</b> (Cloudflare-403, Token aber NICHT lokal abgelaufen) → mit
+    /// hoher Wahrscheinlichkeit die VPN-Ausgangs-IP gesperrt (z. B. M247) → IP rotieren/Server wechseln.</item>
+    /// </list>
+    /// Diskriminator ist der lokal aus dem JWT lesbare <c>exp</c>-Claim (<see cref="JwtHelper.IsExpired"/>):
+    /// ein nicht abgelaufener Bearer + Cloudflare-Block deutet auf die IP, nicht auf den Token.
+    /// </summary>
+    internal static string ClassifyBlockedResponse(string content, string? bearer)
+    {
+        bool tokenExpired = !string.IsNullOrEmpty(bearer) && SafeIsExpired(bearer);
+        if (tokenExpired)
+            return "Chessable-Token ist abgelaufen — bitte den Bearer neu hinterlegen.";
+
+        if (IsCloudflareBlockPage(content))
+            return "Zugriff von Chessable/Cloudflare blockiert (HTTP 403). Der Token ist nicht abgelaufen → " +
+                   "sehr wahrscheinlich ist die VPN-Ausgangs-IP gesperrt: IP rotieren bzw. VPN-Server wechseln. " +
+                   "Falls das nicht hilft, den Bearer prüfen.";
+
+        // HTML/sonstige Nicht-JSON-Antwort ohne eindeutige Cloudflare-Marker.
+        return "Chessable lieferte kein gültiges JSON (Token ungültig oder Zugriff blockiert) — " +
+               "bitte den Bearer neu hinterlegen bzw. die VPN-IP prüfen.";
+    }
+
+    private static bool SafeIsExpired(string bearer)
+    {
+        try { return JwtHelper.IsExpired(bearer); }
+        catch { return false; }
     }
 
     /// <summary>Erkennt einen Chessable-Fehler-Body (z. B. <c>{"error":{"message":"Expired token"}}</c>
@@ -293,11 +339,12 @@ public class ChessableHttpService : IChessableHttpService
             return (null, "Empty course response");
 
         // Abgelaufener Bearer-Fehler-Body bzw. HTML-Seite (Token/Cloudflare/Proxy) → sprechende
-        // Meldung statt „Failed to parse course JSON" bzw. dem rohen JSON-Parser-Text.
+        // Meldung statt „Failed to parse course JSON" bzw. dem rohen JSON-Parser-Text; dabei
+        // Token-Ablauf von (vermutlich VPN-IP-)Block unterscheiden.
         if (TryGetChessableErrorMessage(courseContent) is { } courseApiError)
             return (null, courseApiError);
         if (LooksLikeHtml(courseContent))
-            return (null, "Chessable lieferte eine HTML-Seite statt JSON (Token abgelaufen/ungültig oder Zugriff blockiert) — bitte den Bearer neu hinterlegen.");
+            return (null, ClassifyBlockedResponse(courseContent, bearer));
 
         ResponseCourse? course;
         try

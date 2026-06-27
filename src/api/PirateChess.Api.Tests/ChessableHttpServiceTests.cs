@@ -1,3 +1,5 @@
+using System;
+using System.Text;
 using PirateChess.Api.Services;
 
 namespace PirateChess.Api.Tests;
@@ -91,6 +93,61 @@ public class ChessableHttpServiceTests
     public void LooksLikeHtml_NonHtmlBody_ReturnsFalse(string body)
     {
         Assert.False(ChessableHttpService.LooksLikeHtml(body));
+    }
+
+    // --- Unterscheidung „Token abgelaufen" vs. „IP/Zugriff blockiert" (Cloudflare 403) ---
+
+    private const string CloudflareBlock =
+        "<!DOCTYPE html><html><head><title>Chessable</title></head><body>" +
+        "Sorry, you have been blocked. Cloudflare Ray ID: 8abc123</body></html>";
+
+    /// <summary>Baut ein minimales JWT (header.payload.sig) mit gegebenem exp-Unix-Timestamp.</summary>
+    private static string Jwt(long expUnix)
+    {
+        string B64(string s) => Convert.ToBase64String(Encoding.UTF8.GetBytes(s))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var header = B64("{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
+        var payload = B64($"{{\"exp\":{expUnix},\"user\":{{\"uid\":1}}}}");
+        return $"{header}.{payload}.sig";
+    }
+
+    [Fact]
+    public void ClassifyBlockedResponse_ExpiredBearer_SaysTokenExpired()
+    {
+        var expired = Jwt(DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds());
+        var msg = ChessableHttpService.ClassifyBlockedResponse(CloudflareBlock, expired);
+        Assert.Contains("abgelaufen", msg);
+        Assert.Contains("neu hinterlegen", msg);
+        Assert.DoesNotContain("VPN", msg); // klar Token, nicht IP
+    }
+
+    [Fact]
+    public void ClassifyBlockedResponse_ValidBearer_CloudflareBlock_PointsToVpnIp()
+    {
+        var valid = Jwt(DateTimeOffset.UtcNow.AddDays(1).ToUnixTimeSeconds());
+        var msg = ChessableHttpService.ClassifyBlockedResponse(CloudflareBlock, valid);
+        Assert.Contains("blockiert", msg);
+        Assert.Contains("VPN", msg);          // verweist auf die IP, nicht den Token
+        Assert.Contains("403", msg);
+    }
+
+    [Fact]
+    public void ClassifyBlockedResponse_ValidBearer_GenericHtml_StaysAmbiguousButClean()
+    {
+        var valid = Jwt(DateTimeOffset.UtcNow.AddDays(1).ToUnixTimeSeconds());
+        var msg = ChessableHttpService.ClassifyBlockedResponse("<html><body>nope</body></html>", valid);
+        Assert.Contains("kein gültiges JSON", msg);
+        Assert.DoesNotContain("'<'", msg);    // nie der rohe Parser-Text
+    }
+
+    [Theory]
+    [InlineData("Sorry, you have been blocked Cloudflare Ray ID: abc", true)]
+    [InlineData("<title>Attention Required! | Cloudflare</title>", true)]
+    [InlineData("<html><body>normale Seite</body></html>", false)]
+    [InlineData("{\"homeData\":{}}", false)]
+    public void IsCloudflareBlockPage_DetectsBlockMarkers(string body, bool expected)
+    {
+        Assert.Equal(expected, ChessableHttpService.IsCloudflareBlockPage(body));
     }
 
     // --- curl-Arg-Injektion (Fix HIGH: bid/url floss vorher als "{url}" in einen Args-String) ---
