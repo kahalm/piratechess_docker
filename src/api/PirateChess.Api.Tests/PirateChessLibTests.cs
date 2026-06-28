@@ -166,6 +166,20 @@ public class PirateChessLibTests
     }
 
     [Fact]
+    public void GetVariationPgn_BareMoveNumberToken_DoesNotThrow()
+    {
+        // Regression: ein Varianten-Token, das nach StripMoveNumber nur eine leere/zu kurze SAN
+        // ergibt ("12." -> ""), ließ SanToMove via s[^2] mit IndexOutOfRange den GANZEN Kurs-Abruf
+        // scheitern. Jetzt: null -> als Kommentar gerendert, kein Throw.
+        var ex = Record.Exception(() =>
+        {
+            var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ("S", "12."), ("S", "Nf3")));
+            Assert.DoesNotContain("(12.", pgn);   // keine kaputte Variante
+        });
+        Assert.Null(ex);
+    }
+
+    [Fact]
     public void GetVariationPgn_TwoAlternativesSameNode_RenderedAsSeparateVariations()
     {
         // Zwei Alternativen am selben Knoten (1.d4 / 1.c4) → zwei getrennte (…)-Varianten.

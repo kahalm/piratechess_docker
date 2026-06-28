@@ -334,7 +334,7 @@ namespace piratechess_lib
 
         internal static Move? SanToMove(ChessGame game, string san)
         {
-            string s = san.TrimEnd('+', '#', '!', '?');
+            string s = (san ?? string.Empty).TrimEnd('+', '#', '!', '?');
             int backRank = game.WhoseTurn == Player.White ? 1 : 8;
 
             if (s is "O-O" or "0-0")
@@ -344,7 +344,11 @@ namespace piratechess_lib
 
             char? promo = null;
             int eqIdx = s.IndexOf('=');
-            if (eqIdx >= 0) { promo = s[eqIdx + 1]; s = s[..eqIdx]; }
+            if (eqIdx >= 0) { promo = eqIdx + 1 < s.Length ? s[eqIdx + 1] : (char?)null; s = s[..eqIdx]; }
+
+            // Unzureichende/leere Notation (z. B. nach StripMoveNumber bleibt nur eine Zugnummer übrig):
+            // kein gültiger Zug → null statt s[^2]-IndexOutOfRange, das sonst den ganzen Kurs-Abruf abriss.
+            if (s.Length < 2) return null;
 
             var destFile = (ChessDotNet.File)(char.ToLower(s[^2]) - 'a');
             int destRank = s[^1] - '0';
