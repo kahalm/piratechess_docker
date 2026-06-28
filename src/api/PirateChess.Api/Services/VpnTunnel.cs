@@ -38,7 +38,7 @@ internal sealed class VpnTunnel
     private int _inFlight;
 
     public VpnTunnel(string? proxyUrl, string? controlUrl, IHttpClientFactory httpClientFactory,
-        IConfiguration cfg, ILogger logger, int index)
+        IConfiguration cfg, ILogger logger, int index, int tunnelCount)
     {
         ProxyUrl = string.IsNullOrWhiteSpace(proxyUrl) ? null : proxyUrl;
         _controlUrl = string.IsNullOrWhiteSpace(controlUrl) ? null : controlUrl.TrimEnd('/');
@@ -48,6 +48,13 @@ internal sealed class VpnTunnel
 
         _rotateAfter = cfg.GetValue("Vpn:RotateAfterRequests", 20);
         if (_rotateAfter < 1) _rotateAfter = 20;
+
+        // Stagger: Start-Zähler pro Tunnel versetzen, damit die Tunnel NICHT gleichzeitig rotieren
+        // (sonst stehen bei round-robin alle zugleich → Stall). Tunnel i (0-basiert) startet bei
+        // i*rotateAfter/count → die Rotationen verteilen sich gleichmäßig, immer ist einer oben.
+        if (tunnelCount > 1)
+            _requestCount = (index - 1) * _rotateAfter / tunnelCount;
+
         _restartPauseMs = cfg.GetValue("Vpn:RestartPauseMs", DefaultRestartPauseMs);
         if (_restartPauseMs < 0) _restartPauseMs = DefaultRestartPauseMs;
         _proxyProbeUrl = cfg["Vpn:ProxyProbeUrl"] ?? "https://www.chessable.com/robots.txt";
@@ -61,8 +68,8 @@ internal sealed class VpnTunnel
             _probeClient = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(ProxyProbeTimeoutMs + 2000) };
         }
 
-        _logger.LogInformation("{Label}: proxy={Proxy} control={Control} rotation={Enabled} (every {N})",
-            _label, ProxyUrl ?? "none", _controlUrl ?? "none", _enabled, _rotateAfter);
+        _logger.LogInformation("{Label}: proxy={Proxy} control={Control} rotation={Enabled} (every {N}, start@{Offset})",
+            _label, ProxyUrl ?? "none", _controlUrl ?? "none", _enabled, _rotateAfter, _requestCount);
     }
 
     /// <summary>Zählt den Request mit, rotiert ggf. (drain-aware) und meldet ihn als laufend an.</summary>

@@ -30,7 +30,7 @@ public class VpnRotationService : IVpnRotationService
         {
             var proxy = i < proxyUrls.Count ? proxyUrls[i] : null;
             var control = i < controlUrls.Count ? controlUrls[i] : null;
-            _tunnels.Add(new VpnTunnel(proxy, control, httpClientFactory, configuration, logger, i + 1));
+            _tunnels.Add(new VpnTunnel(proxy, control, httpClientFactory, configuration, logger, i + 1, count));
         }
         logger.LogInformation("VPN-Tunnel-Pool: {Count} Tunnel", _tunnels.Count);
     }
