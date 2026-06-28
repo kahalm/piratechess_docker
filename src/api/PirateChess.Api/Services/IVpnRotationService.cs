@@ -1,37 +1,44 @@
 namespace PirateChess.Api.Services;
 
 /// <summary>
-/// Dreht die öffentliche (gluetun-)Exit-IP über den gluetun-Control-Server.
-/// Spiegelt das Rotations-Muster des ChessResults-Crawlers, der sich denselben
-/// gluetun teilt. Anders als der Crawler läuft piratechess-api NICHT im
-/// gluetun-Namespace, sondern erreicht den Control-Server über das Bridge-Netz
-/// (<c>Gluetun:ControlUrl</c>, z.B. http://gluetun:8000).
+/// Verwaltet einen Pool aus 1..n gluetun-VPN-Tunneln (je eigener HTTP-Proxy + IP-Rotation).
+/// Requests werden round-robin über die Tunnel verteilt; pro Request liefert <see cref="AcquireAsync"/>
+/// ein <see cref="VpnLease"/> mit dem zu nutzenden Proxy. Mit nur einem Tunnel = bisheriges Verhalten.
 /// </summary>
 public interface IVpnRotationService
 {
-    /// <summary>
-    /// Zählt jeden Chessable-Request mit und rotiert die IP nach jeweils
-    /// <c>Vpn:RotateAfterRequests</c> Aufrufen. No-op, wenn die Rotation
-    /// deaktiviert ist (keine <c>Gluetun:ControlUrl</c> konfiguriert).
-    /// Aufruf VOR dem eigentlichen Request → die Rotation passiert immer
-    /// zwischen zwei Requests, nie mitten in einem.
-    /// </summary>
-    Task MaybeRotateAsync(CancellationToken ct = default);
+    /// <summary>Wählt den nächsten Tunnel (round-robin), zählt ihn mit / rotiert ihn bei Bedarf
+    /// (drain-aware) und liefert ein Lease: <see cref="VpnLease.ProxyUrl"/> für den Request, und
+    /// <see cref="VpnLease.Dispose"/> (im finally) meldet den Request als fertig.</summary>
+    Task<VpnLease> AcquireAsync(CancellationToken ct = default);
 
-    /// <summary>
-    /// Meldet das Ende eines mit <see cref="MaybeRotateAsync"/> angemeldeten Requests
-    /// (in <c>finally</c> aufrufen). Nötig, damit bei parallelen Abrufen eine Rotation
-    /// erst startet, wenn alle laufenden Requests fertig sind (kein IP-Wechsel mitten im Flug).
-    /// </summary>
-    void RequestCompleted();
-
-    /// <summary>
-    /// Erzwingt sofort eine Rotation (manueller Trigger / Test) und setzt den
-    /// Request-Zähler zurück. Gibt die neue Public-IP zurück (oder null, wenn
-    /// nicht ermittelbar bzw. keine ControlUrl konfiguriert).
-    /// </summary>
+    /// <summary>Erzwingt sofort eine Rotation ALLER Tunnel (manueller Trigger / Test); liefert die
+    /// erste neue Public-IP (oder null).</summary>
     Task<string?> RotateNowAsync(CancellationToken ct = default);
 
-    /// <summary>Aktuelle Public-IP laut gluetun-Control-Server (best-effort).</summary>
+    /// <summary>Aktuelle Public-IP des ersten Tunnels (best-effort).</summary>
     Task<string?> GetPublicIpAsync(CancellationToken ct = default);
+}
+
+/// <summary>Leiht einen Tunnel für genau einen Request. <see cref="ProxyUrl"/> ist der zu nutzende
+/// Proxy (oder null = direkt). <see cref="Dispose"/> meldet den Request beim Tunnel als beendet
+/// (genau einmal) — im <c>finally</c> aufrufen, damit die drain-aware Rotation korrekt zählt.</summary>
+public sealed class VpnLease : IDisposable
+{
+    public string? ProxyUrl { get; }
+    private readonly Action _onComplete;
+    private bool _completed;
+
+    public VpnLease(string? proxyUrl, Action onComplete)
+    {
+        ProxyUrl = proxyUrl;
+        _onComplete = onComplete;
+    }
+
+    public void Dispose()
+    {
+        if (_completed) return;
+        _completed = true;
+        _onComplete();
+    }
 }

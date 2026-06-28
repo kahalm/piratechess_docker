@@ -16,9 +16,10 @@ public class ChessableHttpService : IChessableHttpService
     private readonly ILogger<ChessableHttpService> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IVpnRotationService _vpn;
+    // Hinweis: Der zu nutzende Proxy kommt jetzt pro Request aus dem VPN-Lease (Multi-Tunnel),
+    // nicht mehr aus einem festen Feld.
     private readonly RawLineCache _lineCache;
     private readonly string _curlPath;
-    private readonly string? _proxyUrl;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     // Der Kurs-Struktur-Abruf hatte bisher keinen Retry. Direkt nach einer VPN-
@@ -83,11 +84,6 @@ public class ChessableHttpService : IChessableHttpService
         // Use curl-impersonate-chrome binary directly (NOT the wrapper scripts
         // which add their own browser headers causing duplicates)
         _curlPath = "/usr/local/bin/curl-impersonate-chrome";
-
-        // Alle Chessable-Calls über den (VPN-)Proxy schicken, falls konfiguriert
-        // (Chessable:ProxyUrl = http://gluetun:8888) — sonst gehen sie mit der Host-IP
-        // raus und profitieren NICHT von der gluetun-IP-Rotation.
-        _proxyUrl = configuration["Chessable:ProxyUrl"];
 
         // Speed-Stellschrauben (per ENV justierbar; Defaults = bisheriges Verhalten):
         _delayMinMs = Math.Max(0, configuration.GetValue("Chessable:InterRequestDelayMinMs", 1000));
@@ -550,34 +546,30 @@ public class ChessableHttpService : IChessableHttpService
 
     private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct)
     {
-        // Request bei der Rotation anmelden (zählt + rotiert ggf. die IP, NACHDEM alle
-        // laufenden Requests gedrained sind → kein IP-Wechsel mitten im Request, auch parallel).
-        await _vpn.MaybeRotateAsync(ct);
-        try
-        {
-            // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
-            // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).
-            var uname = ChessableJwt.TryExtractUname(bearer);
-            using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
+        // Tunnel leihen: wählt round-robin einen VPN-Tunnel, zählt/rotiert ihn (drain-aware → kein
+        // IP-Wechsel mitten im Request, auch parallel) und liefert dessen Proxy. Dispose im finally
+        // meldet den Request beim Tunnel als fertig.
+        using var lease = await _vpn.AcquireAsync(ct);
 
-            var args = BuildGetArgs(url, bearer);
-            return await RunCurlAsync(args, null, url, endpoint, chessableUid, ct);
-        }
-        finally
-        {
-            _vpn.RequestCompleted();   // Gegenstück zur In-Flight-Anmeldung in MaybeRotateAsync
-        }
+        // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
+        // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).
+        var uname = ChessableJwt.TryExtractUname(bearer);
+        using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
+
+        var args = BuildGetArgs(url, bearer);
+        return await RunCurlAsync(args, null, url, endpoint, chessableUid, lease.ProxyUrl, ct);
     }
 
     private async Task<string> CurlPostAsync(string url, string body, string endpoint, string? chessableUid, CancellationToken ct)
     {
+        using var lease = await _vpn.AcquireAsync(ct);
         var args = BuildPostArgs(url);
-        return await RunCurlAsync(args, body, url, endpoint, chessableUid, ct);
+        return await RunCurlAsync(args, body, url, endpoint, chessableUid, lease.ProxyUrl, ct);
     }
 
-    private async Task<string> RunCurlAsync(List<string> args, string? stdinBody, string url, string endpoint, string? chessableUid, CancellationToken ct)
+    private async Task<string> RunCurlAsync(List<string> args, string? stdinBody, string url, string endpoint, string? chessableUid, string? proxyUrl, CancellationToken ct)
     {
-        _logger.LogDebug("curl: {Path} (proxy: {Proxy})", _curlPath, _proxyUrl ?? "none");
+        _logger.LogDebug("curl: {Path} (proxy: {Proxy})", _curlPath, proxyUrl ?? "none");
 
         var psi = new ProcessStartInfo
         {
@@ -591,10 +583,10 @@ public class ChessableHttpService : IChessableHttpService
         // ArgumentList → jedes Token wird einzeln/escaped übergeben (keine Shell, keine Arg-Injektion).
         // curl-impersonate honoriert in unserem Setup keine HTTP(S)_PROXY-Env automatisch
         // → Proxy explizit als --proxy mitgeben, damit die Calls über gluetun/VPN laufen.
-        if (!string.IsNullOrEmpty(_proxyUrl))
+        if (!string.IsNullOrEmpty(proxyUrl))
         {
             psi.ArgumentList.Add("--proxy");
-            psi.ArgumentList.Add(_proxyUrl);
+            psi.ArgumentList.Add(proxyUrl);
         }
         foreach (var arg in args)
             psi.ArgumentList.Add(arg);
