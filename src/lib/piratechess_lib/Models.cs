@@ -46,6 +46,14 @@ namespace piratechess_lib
         public int Id { get; set; }
         public string Name { get; set; } = string.Empty;
     }
+    /// <summary>Pro Vollzug (index = Vollzugnummer ab Linienbeginn) die von Chessable geduldeten
+    /// Züge je Seite. Enthält den Hauptzug PLUS die akzeptierten Alternativen (gemeinsame Stellung).
+    /// W/B können null sein, wenn die Seite an diesem Zug nicht trainiert wird.</summary>
+    public class SoftFailEntry
+    {
+        public List<string>? W { get; set; }
+        public List<string>? B { get; set; }
+    }
     public class Game
     {
         public bool Owned { get; set; }
@@ -53,6 +61,8 @@ namespace piratechess_lib
         public string Initial { get; set; } = string.Empty;
         public string Color { get; set; } = string.Empty;
         public int IsInfo { get; set; }
+        /// <summary>Chessable „softFail" — geduldete Alternativzüge je Vollzug/Seite (siehe SoftFailEntry).</summary>
+        public List<SoftFailEntry>? SoftFail { get; set; }
         public string GeneratePGN(bool allKeyMovesTraining = false, bool noTrainingMove = false)
         {
             string pgn = "";
@@ -155,6 +165,8 @@ namespace piratechess_lib
             }
 
             int lastMove = 0;
+            // Vollzugnummer des Linienbeginns — softFail ist ab da 0-basiert indiziert.
+            int firstMoveNum = sortedMoves.Count > 0 ? sortedMoves.Values.First().Move : 1;
             foreach (JsonMove move in sortedMoves.Values)
             {
                 if (move.CommentBefore != "")
@@ -197,6 +209,27 @@ namespace piratechess_lib
                         firstrun = false;
                     }
                     annotation += "]";
+                }
+
+                // Geduldete Alternativzüge (Chessable softFail) als [%alt …] — der Repertoire-Trainer
+                // akzeptiert sie, verlangt aber trotzdem den Hauptzug. softFail listet Hauptzug +
+                // Alternativen; den gespielten Zug selbst ziehen wir ab.
+                if (SoftFail != null)
+                {
+                    int sfIdx = move.Move - firstMoveNum;
+                    if (sfIdx >= 0 && sfIdx < SoftFail.Count && SoftFail[sfIdx] != null)
+                    {
+                        var accepted = move.Col == "w" ? SoftFail[sfIdx].W : SoftFail[sfIdx].B;
+                        if (accepted != null)
+                        {
+                            var alts = accepted
+                                .Where(a => !string.IsNullOrWhiteSpace(a) && a != move.San)
+                                .Distinct()
+                                .ToList();
+                            if (alts.Count > 0)
+                                annotation += $"[%alt {string.Join(" ", alts)}]";
+                        }
+                    }
                 }
 
                 if (move.CommentAfter != "")
@@ -364,6 +397,8 @@ namespace piratechess_lib
     {
         public int Id { get; set; }
         public int Move { get; set; }
+        /// <summary>Ziehende Seite: "w" oder "b" (Chessable-Feld „col").</summary>
+        public string Col { get; set; } = string.Empty;
         public string San { get; set; } = string.Empty;
         public string After { get; set; } = string.Empty;
         public string Before { get; set; } = string.Empty;

@@ -173,4 +173,43 @@ public class PirateChessLibTests
         Assert.Contains("(1.d4)", pgn);
         Assert.Contains("(1.c4)", pgn);
     }
+
+    // ---- softFail (geduldete Züge) → [%alt …] ------------------------------
+    [Fact]
+    public void GeneratePGN_SoftFail_EmittedAsAltAnnotationMinusMainMove()
+    {
+        // 1.e4 e6 mit softFail an Schwarz' 1. Zug: e6 (Hauptzug) + e5/c5 (geduldet).
+        var game = new Game
+        {
+            Initial = "",
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w" },
+                new JsonMove { Id = 1, Move = 1, San = "e6", Col = "b" },
+            ],
+            SoftFail =
+            [
+                new SoftFailEntry { W = null, B = ["e6", "e5", "c5"] },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        // Der gespielte Hauptzug (e6) ist NICHT in der Alt-Liste, die geduldeten schon.
+        Assert.Contains("[%alt e5 c5]", pgn);
+    }
+
+    [Fact]
+    public void GeneratePGN_NoSoftFail_NoAltAnnotation()
+    {
+        var game = new Game
+        {
+            Initial = "",
+            Data = [ new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w" } ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.DoesNotContain("%alt", pgn);
+    }
 }
