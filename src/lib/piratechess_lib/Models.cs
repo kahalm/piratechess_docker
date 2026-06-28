@@ -78,7 +78,8 @@ namespace piratechess_lib
                             }
                             else if (data.Key == "V")
                             {
-                                string v = data.GetVariationPgn();
+                                // Anknüpfpunkt der Variante = Stellung VOR diesem Zug (Alternative zu ihm).
+                                string v = data.GetVariationPgn(responseMoveAfter.Before);
                                 if (v != "") variations.Add(v);
                             }
                         }
@@ -154,7 +155,6 @@ namespace piratechess_lib
             }
 
             int lastMove = 0;
-            string pendingVariations = "";
             foreach (JsonMove move in sortedMoves.Values)
             {
                 if (move.CommentBefore != "")
@@ -167,12 +167,6 @@ namespace piratechess_lib
                     pgn += $"{move.Move}. ";
                 }
                 pgn += move.San + " ";
-
-                if (pendingVariations != "")
-                {
-                    pgn += pendingVariations + " ";
-                    pendingVariations = "";
-                }
 
                 // Chessable kann "draws": null bzw. einzelne null-Eintraege liefern; das Property-Pattern
                 // filtert null-Elemente mit aus (NullRef in GeneratePGN, bid 282212).
@@ -215,16 +209,14 @@ namespace piratechess_lib
                     pgn += $"{{{annotation}}} ";
                 }
 
+                // Varianten direkt NACH ihrem eigenen Zug ausgeben (sie sind Alternativen zu IHM),
+                // nicht verzögert nach dem Folgezug — sonst hängt der PGN-Leser sie an den falschen Zug.
                 if (move.CommentVariations != "")
                 {
-                    pendingVariations = move.CommentVariations;
+                    pgn += move.CommentVariations + " ";
                 }
 
                 lastMove = move.Move;
-            }
-            if (pendingVariations != "")
-            {
-                pgn += pendingVariations + " ";
             }
             return pgn;
         }
@@ -307,7 +299,7 @@ namespace piratechess_lib
             return null;
         }
 
-        private static Move? SanToMove(ChessGame game, string san)
+        internal static Move? SanToMove(ChessGame game, string san)
         {
             string s = san.TrimEnd('+', '#', '!', '?');
             int backRank = game.WhoseTurn == Player.White ? 1 : 8;
@@ -479,76 +471,163 @@ namespace piratechess_lib
             }
         }
 
-        public string GetVariationPgn()
+        /// <summary>
+        /// Wandelt die Chessable-„V"-Daten eines Zuges in PGN um. Chessables „V" enthält ZWEI Sorten:
+        /// (a) echte Seitenlinien, die am Elternzug abzweigen und legal nachspielbar sind, und
+        /// (b) Transpositions-/Verweis-Notizen mit absoluten Zugnummern ab Zug 1, die NICHT von hier
+        /// fortsetzen. Früher wurden beide blind als <c>(…)</c> ausgegeben → ungültiges, nicht
+        /// nachspielbares PGN (Duplikate, fremde Zugnummern, Nullzüge „--").
+        ///
+        /// Jetzt zweistufig: die Items werden an Zugnummern-Rücksprüngen in Cluster (einzelne
+        /// Alternativlinien) zerlegt, und JEDER Cluster wird ab der Elternstellung (<paramref name="branchFen"/>
+        /// = Stellung VOR dem Elternzug) mit der Engine nachgespielt. Spielt er legal durch → echte
+        /// <c>(…)</c>-Variante; sonst (illegaler Zug / Nullzug / unbekannte FEN) → als <c>{Kommentar}</c>
+        /// ausgegeben, damit das PGN gültig bleibt und der Inhalt erhalten bleibt.
+        /// </summary>
+        public string GetVariationPgn(string branchFen)
         {
             if (Key != "V" || Val == null || Val.Value.ValueKind != JsonValueKind.Array)
                 return "";
 
             var innerList = JsonSerializer.Deserialize<List<JsonMoveItemList>>(Val.Value, options: Options.GetOptions()) ?? [];
-            var variations = new List<string>();
-            var sb = new StringBuilder("(");
-            string pendingComment = "";
-            int lastWhiteMoveNum = 0;
 
+            // ---- Phase 1: in Cluster (Alternativlinien) zerlegen ----
+            var clusters = new List<List<JsonMoveItemList>>();
+            var cur = new List<JsonMoveItemList>();
+            int lastOrder = int.MinValue;
             foreach (var item in innerList)
             {
-                if (item.Key == "S" && item.Val != null && item.Val.Value.ValueKind == JsonValueKind.String)
+                if (item.Key == "S")
                 {
-                    string san = item.Val.Value.GetString() ?? "";
-                    var m = findWhiteMoveNumber().Match(san);
-                    if (m.Success)
+                    string raw = (item.Val?.ValueKind == JsonValueKind.String ? item.Val.Value.GetString() : "") ?? "";
+                    int? ord = MoveOrder(raw);
+                    if (ord.HasValue)
                     {
-                        int moveNum = int.Parse(m.Groups[1].Value);
-                        if (moveNum <= lastWhiteMoveNum)
+                        if (ord.Value <= lastOrder && cur.Count > 0)
                         {
-                            // New alternative line — close current variation and start a new one
-                            if (pendingComment != "")
-                            {
-                                sb.Append($"{{{pendingComment}}}");
-                                pendingComment = "";
-                            }
-                            variations.Add(sb.ToString().TrimEnd() + ")");
-                            sb = new StringBuilder("(");
-                            lastWhiteMoveNum = 0;
+                            clusters.Add(cur);
+                            cur = [];
+                            lastOrder = int.MinValue;
                         }
-                        lastWhiteMoveNum = moveNum;
+                        lastOrder = ord.Value;
                     }
+                }
+                cur.Add(item);
+            }
+            if (cur.Count > 0) clusters.Add(cur);
 
-                    if (pendingComment != "")
-                    {
-                        sb.Append($"{{{pendingComment}}} ");
-                        pendingComment = "";
-                    }
-                    sb.Append(san);
-                    sb.Append(' ');
-                }
-                else if (item.Key == "C")
+            // ---- Phase 2: jeden Cluster nachspielen → Variante oder Kommentar ----
+            var parts = new List<string>();
+            foreach (var cluster in clusters)
+            {
+                ChessGame? game = TryNewGame(branchFen);
+                var body = new StringBuilder();         // gültige Varianten-Notation
+                var rawText = new StringBuilder();       // Fallback-Klartext (Kommentar)
+                bool anyMove = false, legal = true, hasNull = false;
+
+                foreach (var item in cluster)
                 {
-                    string c = item.CommentAfter;
-                    if (c != "")
-                        pendingComment += (pendingComment != "" ? " " : "") + c;
-                }
-                else if (item.Key == "V")
-                {
-                    if (pendingComment != "")
+                    if (item.Key == "C")
                     {
-                        sb.Append($"{{{pendingComment}}} ");
-                        pendingComment = "";
+                        string c = item.CommentAfter;
+                        if (c != "") { body.Append($"{{{c}}} "); AppendText(rawText, c); }
                     }
-                    sb.Append(item.GetVariationPgn());
-                    sb.Append(' ');
+                    else if (item.Key == "V")
+                    {
+                        // Verschachtelte Variante → als Klartext einbetten (gültig + einfach).
+                        string nested = item.FlattenToText();
+                        if (nested != "") { body.Append($"{{{nested}}} "); AppendText(rawText, nested); }
+                    }
+                    else if (item.Key == "S")
+                    {
+                        string raw = ((item.Val?.ValueKind == JsonValueKind.String ? item.Val.Value.GetString() : "") ?? "").Trim();
+                        if (raw == "") continue;
+                        anyMove = true;
+                        AppendText(rawText, raw);
+                        if (raw.Contains("--")) { hasNull = true; continue; }
+                        if (game != null && legal && !hasNull)
+                        {
+                            var mv = Game.SanToMove(game, StripMoveNumber(raw));
+                            if (mv != null)
+                            {
+                                try { game.MakeMove(mv, false); body.Append(raw + " "); }
+                                catch { legal = false; }
+                            }
+                            else legal = false;
+                        }
+                    }
+                }
+
+                if (anyMove && legal && !hasNull)
+                {
+                    string b = body.ToString().Trim();
+                    if (b != "") parts.Add($"({b})");
+                }
+                else
+                {
+                    string t = rawText.ToString().Trim();
+                    if (t != "") parts.Add($"{{{t}}}");
                 }
             }
+            return string.Join(" ", parts);
+        }
 
-            if (pendingComment != "")
-                sb.Append($"{{{pendingComment}}}");
+        /// <summary>Flacht eine (verschachtelte) „V"-Struktur rein zu Text ab (Züge + Kommentare, ohne Klammern/FEN-Bezug).</summary>
+        private string FlattenToText()
+        {
+            if (Val == null || Val.Value.ValueKind != JsonValueKind.Array) return "";
+            var list = JsonSerializer.Deserialize<List<JsonMoveItemList>>(Val.Value, options: Options.GetOptions()) ?? [];
+            var sb = new StringBuilder();
+            foreach (var it in list)
+            {
+                if (it.Key == "S")
+                {
+                    string s = ((it.Val?.ValueKind == JsonValueKind.String ? it.Val.Value.GetString() : "") ?? "").Trim();
+                    if (s != "") AppendText(sb, s);
+                }
+                else if (it.Key == "C") { string c = it.CommentAfter; if (c != "") AppendText(sb, c); }
+                else if (it.Key == "V") { string n = it.FlattenToText(); if (n != "") AppendText(sb, n); }
+            }
+            return sb.ToString().Trim();
+        }
 
-            variations.Add(sb.ToString().TrimEnd() + ")");
-            return string.Join(" ", variations);
+        private static ChessGame? TryNewGame(string? fen)
+        {
+            try { return string.IsNullOrWhiteSpace(fen) ? new ChessGame() : new ChessGame(fen); }
+            catch { return null; }
+        }
+
+        /// <summary>Sortierschlüssel eines „N." / „N..."-Zugtokens (weiß = N·2, schwarz = N·2+1); null bei bloßer SAN.</summary>
+        private static int? MoveOrder(string raw)
+        {
+            var mw = findWhiteMoveNumber().Match(raw);
+            if (mw.Success) return int.Parse(mw.Groups[1].Value) * 2;
+            var mb = findBlackMoveNumber().Match(raw);
+            if (mb.Success) return int.Parse(mb.Groups[1].Value) * 2 + 1;
+            return null;
+        }
+
+        /// <summary>Entfernt die führende Zugnummer („12." / „12...") aus einem Token; lässt bloße SAN unberührt.</summary>
+        private static string StripMoveNumber(string raw)
+        {
+            var m = findLeadingMoveNumber().Match(raw);
+            return m.Success ? raw[m.Length..].Trim() : raw.Trim();
+        }
+
+        private static void AppendText(StringBuilder sb, string s)
+        {
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append(s);
         }
 
         [GeneratedRegex(@"^(\d+)\.(?!\.)")]
         private static partial Regex findWhiteMoveNumber();
+
+        [GeneratedRegex(@"^(\d+)\.\.\.")]
+        private static partial Regex findBlackMoveNumber();
+
+        [GeneratedRegex(@"^\d+\.(\.\.)?\s*")]
+        private static partial Regex findLeadingMoveNumber();
 
         [GeneratedRegex("<[^>]*>")]
         private static partial Regex findHtmltags();

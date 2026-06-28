@@ -112,4 +112,65 @@ public class PirateChessLibTests
 
         Assert.Null(ex);
     }
+
+    // ---- Chessable-"V"-Varianten → gültiges PGN ----------------------------
+    // Chessables "V"-Daten mischen echte (legale) Seitenlinien mit Transpositions-/Verweis-
+    // Notizen (absolute Zugnummern ab Zug 1, Nullzüge "--"). Früher wurden alle blind als
+    // (…) ausgegeben → ungültiges, nicht nachspielbares PGN. Jetzt: legal nachspielbar ab der
+    // Elternstellung ⇒ echte (…)-Variante; sonst ⇒ {Kommentar} (PGN bleibt gültig).
+    private const string StartFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+    private static string AfterWithV(string beforeFen, params (string key, string val)[] items)
+    {
+        var inner = string.Join(",", items.Select(it => $"{{\"key\":\"{it.key}\",\"state\":\"\",\"val\":\"{it.val}\"}}"));
+        return $"{{\"before\":\"{beforeFen}\",\"after\":\"\",\"data\":[{{\"key\":\"V\",\"state\":\"\",\"val\":[{inner}]}}]}}";
+    }
+
+    private static string PgnForFirstMoveWithV(string after)
+    {
+        var game = new Game { Initial = "", Data = [ new JsonMove { Id = 0, Move = 1, San = "e4", After = after } ] };
+        return game.GeneratePGN(noTrainingMove: true);
+    }
+
+    [Fact]
+    public void GetVariationPgn_LegalSideline_RenderedAsPlayableVariation()
+    {
+        // 1.d4 d5 2.c4 ist ab der Grundstellung legal nachspielbar → echte Variante.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ("S", "1.d4"), ("S", "d5"), ("S", "2.c4")));
+        Assert.Contains("(1.d4 d5 2.c4)", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_LegalSidelineWithComment_KeepsCommentInsideVariation()
+    {
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ("S", "1.d4"), ("C", "Damengambit"), ("S", "d5")));
+        Assert.Contains("(1.d4 {Damengambit} d5)", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_IllegalTranspositionNote_RenderedAsCommentNotBrokenVariation()
+    {
+        // 3...Bb7 4.e3 setzt NICHT von der Grundstellung fort → darf keine (…)-Variante werden.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ("S", "3...Bb7"), ("S", "4.e3")));
+        Assert.DoesNotContain("(3...Bb7", pgn);
+        Assert.Contains("{3...Bb7 4.e3}", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_NullMove_RenderedAsComment()
+    {
+        // Nullzug "--" ist nicht nachspielbar → Kommentar statt kaputter Variante.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ("S", "19...--"), ("S", "20.Rh8+")));
+        Assert.DoesNotContain("(19", pgn);
+        Assert.Contains("{19...-- 20.Rh8+}", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_TwoAlternativesSameNode_RenderedAsSeparateVariations()
+    {
+        // Zwei Alternativen am selben Knoten (1.d4 / 1.c4) → zwei getrennte (…)-Varianten.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ("S", "1.d4"), ("S", "1.c4")));
+        Assert.Contains("(1.d4)", pgn);
+        Assert.Contains("(1.c4)", pgn);
+    }
 }
