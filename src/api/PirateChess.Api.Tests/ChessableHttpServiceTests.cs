@@ -187,4 +187,21 @@ public class ChessableHttpServiceTests
         Assert.Contains("@-", args);                                  // Body aus stdin
         Assert.Equal("https://www.chessable.com/api/v1/authenticate", args[^1]);
     }
+    [Fact]
+    public void BuildGetArgs_SetsConnectTimeout30()
+    {
+        var args = ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?oid=1", "bearer");
+        var i = args.IndexOf("--connect-timeout");
+        Assert.True(i >= 0, "--connect-timeout fehlt");
+        Assert.Equal("30", args[i + 1]);
+    }
+
+    [Fact]
+    public void BuildPostArgs_SetsConnectTimeout30()
+    {
+        var args = ChessableHttpService.BuildPostArgs("https://www.chessable.com/api/v1/authenticate");
+        var i = args.IndexOf("--connect-timeout");
+        Assert.True(i >= 0, "--connect-timeout fehlt");
+        Assert.Equal("30", args[i + 1]);
+    }
 }

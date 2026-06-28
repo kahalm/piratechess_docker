@@ -28,6 +28,11 @@ public class ChessableHttpService : IChessableHttpService
     private const int CourseFetchAttempts = 4;
     private const int ProxyRetryDelayMs = 4000;
 
+    // curl bricht die (Proxy-)CONNECT-Phase nach so vielen Sekunden ab, statt im Default bis ~300 s
+    // zu hängen. Bei soft-geblockter/hängender VPN-IP fror ein Request sonst den Import minutenlang
+    // ein; jetzt schlägt er nach 30 s fehl → der Line-Retry (30 s Backoff) greift schnell.
+    private const int CurlConnectTimeoutSec = 30;
+
     // Der Kapitel-Abruf (getList) hatte bisher weder Validierung noch Retry: ein mitten im
     // Stream abgebrochener Body (~8 KB-Truncation durch den VPN-Proxy) ist nicht-leer, aber
     // unvollständig → er parst NICHT als ResponseChapter, wurde aber truncated gecacht und ließ
@@ -765,7 +770,7 @@ public class ChessableHttpService : IChessableHttpService
     /// </summary>
     public static List<string> BuildGetArgs(string url, string bearer)
     {
-        var args = new List<string> { "-s", "-S" };
+        var args = new List<string> { "-s", "-S", "--connect-timeout", CurlConnectTimeoutSec.ToString() };
         args.AddRange(TlsArgs);
         AddHeader(args, "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0");
         AddHeader(args, "accept: application/json, text/plain, */*");
@@ -791,7 +796,7 @@ public class ChessableHttpService : IChessableHttpService
     /// <summary>Wie <see cref="BuildGetArgs"/>, für POST (Body via stdin, <c>-d @-</c>).</summary>
     public static List<string> BuildPostArgs(string url)
     {
-        var args = new List<string> { "-s", "-S" };
+        var args = new List<string> { "-s", "-S", "--connect-timeout", CurlConnectTimeoutSec.ToString() };
         args.AddRange(TlsArgs);
         args.Add("-X"); args.Add("POST");
         AddHeader(args, "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0");
