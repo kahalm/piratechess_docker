@@ -33,7 +33,8 @@ internal sealed class VpnTunnel
     private readonly string _label;
     private readonly HttpClient? _probeClient;   // durch DIESEN Tunnel-Proxy (für Readiness-Probe)
 
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _lock = new();
+    private volatile bool _rotating;
     private int _requestCount;
     private int _inFlight;
 
@@ -72,26 +73,46 @@ internal sealed class VpnTunnel
             _label, ProxyUrl ?? "none", _controlUrl ?? "none", _enabled, _rotateAfter, _requestCount);
     }
 
-    /// <summary>Zählt den Request mit, rotiert ggf. (drain-aware) und meldet ihn als laufend an.</summary>
-    public async Task MaybeRotateAsync(CancellationToken ct = default)
+    /// <summary>Versucht, diesen Tunnel für EINEN Request zu belegen. Liefert <c>false</c>, wenn der
+    /// Tunnel gerade rotiert (→ der Pool nimmt einen anderen Tunnel). Sonst: Request zählen, ggf. eine
+    /// Rotation IM HINTERGRUND anstoßen (der auslösende Request läuft noch auf der aktuellen IP weiter
+    /// — er ist der RotateAfter-te und damit noch erlaubt) und <c>true</c> zurückgeben. So wartet KEIN
+    /// Request je auf eine Rotation: während ein Tunnel rotiert, liefert der/die andere(n) weiter.</summary>
+    public bool TryAcquire()
     {
-        if (!_enabled) return;
-        await _gate.WaitAsync(ct);
-        try
+        if (!_enabled) return true;          // ohne Control-Server: keine Rotation, kein Tracking
+        lock (_lock)
         {
+            if (_rotating) return false;     // rotiert gerade → Pool soll anderen Tunnel nehmen
+            Interlocked.Increment(ref _inFlight);
             _requestCount++;
             if (_requestCount >= _rotateAfter)
             {
                 _requestCount = 0;
-                await DrainInFlightAsync(ct);
-                await RotateInternalAsync(ct);
+                _rotating = true;
+                _ = RotateInBackgroundAsync();   // fire-and-forget: erst drainen, dann IP wechseln
             }
-            Interlocked.Increment(ref _inFlight);
+            return true;
         }
-        finally { _gate.Release(); }
     }
 
-    /// <summary>Gegenstück zu <see cref="MaybeRotateAsync"/> (im finally des Aufrufers).</summary>
+    /// <summary>true, solange dieser Tunnel gerade rotiert (Diagnose).</summary>
+    public bool IsRotating => _rotating;
+
+    /// <summary>Hintergrund-Rotation: wartet bis die laufenden Requests (inkl. dem Auslöser) fertig
+    /// sind (drain), wechselt dann die IP. Währenddessen liefert <see cref="TryAcquire"/> false.</summary>
+    private async Task RotateInBackgroundAsync()
+    {
+        try
+        {
+            await DrainInFlightAsync(CancellationToken.None);
+            await RotateInternalAsync(CancellationToken.None);
+        }
+        catch (Exception ex) { _logger.LogWarning("{Label}: background rotation failed: {E}", _label, ex.Message); }
+        finally { _rotating = false; }
+    }
+
+    /// <summary>Gegenstück zu <see cref="TryAcquire"/> (im Dispose des Lease): Request als fertig melden.</summary>
     public void RequestCompleted()
     {
         if (!_enabled) return;
@@ -117,9 +138,11 @@ internal sealed class VpnTunnel
     public async Task<string?> RotateNowAsync(CancellationToken ct = default)
     {
         if (_controlUrl is null) return null;
-        await _gate.WaitAsync(ct);
-        try { _requestCount = 0; return await RotateInternalAsync(ct); }
-        finally { _gate.Release(); }
+        bool began;
+        lock (_lock) { began = !_rotating; if (began) { _rotating = true; _requestCount = 0; } }
+        if (!began) return null;       // es läuft bereits eine (Hintergrund-)Rotation
+        try { await DrainInFlightAsync(ct); return await RotateInternalAsync(ct); }
+        finally { _rotating = false; }
     }
 
     public async Task<string?> GetPublicIpAsync(CancellationToken ct = default)

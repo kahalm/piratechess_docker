@@ -39,9 +39,19 @@ public class VpnRotationService : IVpnRotationService
     /// dessen Proxy für den Request zu nutzen ist; <c>Dispose</c> meldet den Request als fertig.</summary>
     public async Task<VpnLease> AcquireAsync(CancellationToken ct = default)
     {
-        var tunnel = _tunnels[(int)((uint)Interlocked.Increment(ref _rr) % (uint)_tunnels.Count)];
-        await tunnel.MaybeRotateAsync(ct);
-        return new VpnLease(tunnel.ProxyUrl, tunnel.RequestCompleted);
+        // Round-robin, aber rotierende Tunnel überspringen → der Request läuft auf einem bereiten
+        // Tunnel statt an dessen Rotation zu warten. Mit Stagger rotiert höchstens einer, also ist
+        // immer einer frei. Nur falls (sehr selten) ALLE rotieren: kurz warten und erneut versuchen.
+        for (var attempt = 0; ; attempt++)
+        {
+            for (var k = 0; k < _tunnels.Count; k++)
+            {
+                var tunnel = _tunnels[(int)((uint)Interlocked.Increment(ref _rr) % (uint)_tunnels.Count)];
+                if (tunnel.TryAcquire())
+                    return new VpnLease(tunnel.ProxyUrl, tunnel.RequestCompleted);
+            }
+            await Task.Delay(50, ct);
+        }
     }
 
     /// <summary>Rotiert ALLE Tunnel sofort (manueller Trigger); liefert die erste neue IP.</summary>
