@@ -19,6 +19,13 @@ public interface IVpnRotationService
     Task MaybeRotateAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Meldet das Ende eines mit <see cref="MaybeRotateAsync"/> angemeldeten Requests
+    /// (in <c>finally</c> aufrufen). Nötig, damit bei parallelen Abrufen eine Rotation
+    /// erst startet, wenn alle laufenden Requests fertig sind (kein IP-Wechsel mitten im Flug).
+    /// </summary>
+    void RequestCompleted();
+
+    /// <summary>
     /// Erzwingt sofort eine Rotation (manueller Trigger / Test) und setzt den
     /// Request-Zähler zurück. Gibt die neue Public-IP zurück (oder null, wenn
     /// nicht ermittelbar bzw. keine ControlUrl konfiguriert).

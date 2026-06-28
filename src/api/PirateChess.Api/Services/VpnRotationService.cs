@@ -28,6 +28,11 @@ public class VpnRotationService : IVpnRotationService
     // kein Request startet, während rotiert wird (Aufrufer awaiten MaybeRotateAsync).
     private readonly SemaphoreSlim _gate = new(1, 1);
     private int _requestCount;
+    // Laufende (parallele) Requests. Vor einer Rotation wird auf 0 gewartet (Drain), damit kein
+    // Request die IP unter sich wechseln sieht. Backstop, falls ein Request hängt.
+    private int _inFlight;
+    private const int DrainTimeoutMs = 60000;
+    private const int DrainPollMs = 25;
 
     public VpnRotationService(
         IHttpClientFactory httpClientFactory,
@@ -72,12 +77,42 @@ public class VpnRotationService : IVpnRotationService
             if (_requestCount >= _rotateAfter)
             {
                 _requestCount = 0;
+                // Erst alle bereits laufenden (parallelen) Requests abwarten, DANN rotieren —
+                // sonst verlöre ein in-flight-Request mitten im Abruf die IP. Das Gate hält
+                // derweil neue Requests zurück; Decrement läuft per RequestCompleted gate-frei.
+                await DrainInFlightAsync(ct);
                 await RotateInternalAsync(ct);
             }
+            // Request als laufend anmelden (NACH einer evtl. Rotation, damit er nicht sich
+            // selbst aus dem Drain blockiert). Gegenstück: RequestCompleted im finally des Aufrufers.
+            Interlocked.Increment(ref _inFlight);
         }
         finally
         {
             _gate.Release();
+        }
+    }
+
+    public void RequestCompleted()
+    {
+        if (!_enabled) return;
+        Interlocked.Decrement(ref _inFlight);
+    }
+
+    private async Task DrainInFlightAsync(CancellationToken ct)
+    {
+        var waited = 0;
+        while (Volatile.Read(ref _inFlight) > 0)
+        {
+            await Task.Delay(DrainPollMs, ct);
+            waited += DrainPollMs;
+            if (waited >= DrainTimeoutMs)
+            {
+                _logger.LogWarning(
+                    "VPN-Rotation: Drain-Timeout nach {Ms} ms mit {InFlight} laufenden Requests — rotiere trotzdem",
+                    waited, Volatile.Read(ref _inFlight));
+                break;
+            }
         }
     }
 

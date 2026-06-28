@@ -38,10 +38,14 @@ public class ChessableHttpService : IChessableHttpService
     // Zufälliger Abstand zwischen zwei aufeinanderfolgenden Zeilen-/Kapitel-Requests
     // (menschenähnliches Timing). Prod-Messung 2026-06-15: Chessables Block ist NICHT
     // timing-getrieben sondern requests-pro-IP-getrieben (IP wird nach ~10 Requests
-    // soft-geblockt, daher steuert Vpn:RotateAfterRequests=10 die Block-Rate ~0%).
-    // Delay 2–5s brachte gg. Block nichts → zurück auf 1–2s, spart Kursdauer.
-    private const int InterRequestDelayMinMs = 1000;
-    private const int InterRequestDelayMaxMs = 2000;
+    // soft-geblockt, daher steuert Vpn:RotateAfterRequests die Block-Rate ~0%).
+    // Konfigurierbar über Chessable:InterRequestDelayMinMs/MaxMs (zum Beschleunigen runtersetzen).
+    private readonly int _delayMinMs;
+    private readonly int _delayMaxMs;
+    // Wie viele Zeilen eines Kapitels parallel geholt werden (Chessable:ParallelLineFetches).
+    // 1 = altes serielles Verhalten. >1 beschleunigt; die VPN-Rotation ist drain-aware, wechselt
+    // also die IP nie mitten in einem laufenden Request (siehe VpnRotationService).
+    private readonly int _parallelLineFetches;
 
     // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
     private const string TlsFlags =
@@ -79,7 +83,16 @@ public class ChessableHttpService : IChessableHttpService
         // (Chessable:ProxyUrl = http://gluetun:8888) — sonst gehen sie mit der Host-IP
         // raus und profitieren NICHT von der gluetun-IP-Rotation.
         _proxyUrl = configuration["Chessable:ProxyUrl"];
+
+        // Speed-Stellschrauben (per ENV justierbar; Defaults = bisheriges Verhalten):
+        _delayMinMs = Math.Max(0, configuration.GetValue("Chessable:InterRequestDelayMinMs", 1000));
+        _delayMaxMs = Math.Max(_delayMinMs + 1, configuration.GetValue("Chessable:InterRequestDelayMaxMs", 2000));
+        _parallelLineFetches = Math.Clamp(configuration.GetValue("Chessable:ParallelLineFetches", 1), 1, 16);
     }
+
+    /// <summary>Zufällige Inter-Request-Pause (0, wenn beide Delays 0). Nur nach echtem Request nötig.</summary>
+    private Task RandomDelayAsync(CancellationToken ct) =>
+        _delayMaxMs <= 0 ? Task.CompletedTask : Task.Delay(Random.Shared.Next(_delayMinMs, _delayMaxMs), ct);
 
     public async Task<(string? jwt, string? error)> LoginAsync(string email, string password, CancellationToken ct = default)
     {
@@ -421,20 +434,21 @@ public class ChessableHttpService : IChessableHttpService
                 ChapterJsonContent = chapterContent
             };
 
-            // 3. Fetch each line in the chapter
-            for (int lineIdx = 0; lineIdx < responseChapter.List.Data.Count; lineIdx++)
+            // 3. Fetch each line in the chapter — reihenfolge-erhaltend, optional parallel
+            //    (Chessable:ParallelLineFetches). Die VPN-Rotation ist drain-aware, wechselt die
+            //    IP also nie mitten in einem laufenden Request — daher ist Parallelität block-sicher.
+            var lines = responseChapter.List.Data;
+            var lineSlots = new RestResponseLine[lines.Count];
+            int chapterDone = 0;
+
+            async Task FetchLineAsync(int lineIdx)
             {
-                ct.ThrowIfCancellationRequested();
-
-                var line = responseChapter.List.Data[lineIdx];
-                onLineProgress?.Invoke($"{lineIdx + 1} / {responseChapter.List.Data.Count}");
-
+                var line = lines[lineIdx];
                 var lineUrl = $"https://www.chessable.com/api/v1/getGame?lng=en&uid={uid}&oid={line.Id}";
                 string round = $"{(chapterIdx + 2):000}.{(lineIdx + 2):000}";
 
                 // Resume-Cache: eine schon einmal erfolgreich geholte Linie (oid) wiederverwenden →
-                // kein Chessable-Call, keine Inter-Request-Pause. Bricht ein Kursabruf in der Mitte
-                // ab, holt der Neustart so nur noch die fehlenden Linien.
+                // kein Chessable-Call, keine Inter-Request-Pause.
                 string? lineContent = await _lineCache.GetAsync(line.Id, ct);
                 bool fromCache = lineContent is not null;
 
@@ -480,25 +494,50 @@ public class ChessableHttpService : IChessableHttpService
                         await _lineCache.SetAsync(line.Id, lineContent, ct);
                 }
 
-                restResponseChapter.ResponseLineList.Add(new RestResponseLine
-                {
-                    Oid = line.Id,
-                    LineJsonContent = lineContent ?? ""
-                });
+                lineSlots[lineIdx] = new RestResponseLine { Oid = line.Id, LineJsonContent = lineContent ?? "" };
 
-                cumLines++;
-                onCumulativeLines?.Invoke(cumLines.ToString());
+                onCumulativeLines?.Invoke(Interlocked.Increment(ref cumLines).ToString());
+                onLineProgress?.Invoke($"{Interlocked.Increment(ref chapterDone)} / {lines.Count}");
 
-                // Random delay between line requests — nur nach echtem Request (Cache-Treffer braucht keine).
-                if (!fromCache && lineIdx < responseChapter.List.Data.Count - 1)
-                    await Task.Delay(Random.Shared.Next(InterRequestDelayMinMs, InterRequestDelayMaxMs), ct);
+                // Inter-Request-Pause nur nach echtem Request (Cache-Treffer braucht keine).
+                if (!fromCache) await RandomDelayAsync(ct);
             }
+
+            if (_parallelLineFetches <= 1)
+            {
+                for (int lineIdx = 0; lineIdx < lines.Count; lineIdx++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    await FetchLineAsync(lineIdx);
+                }
+            }
+            else
+            {
+                using var sem = new SemaphoreSlim(_parallelLineFetches);
+                var tasks = new List<Task>(lines.Count);
+                for (int lineIdx = 0; lineIdx < lines.Count; lineIdx++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    await sem.WaitAsync(ct);
+                    int idx = lineIdx;
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        try { await FetchLineAsync(idx); }
+                        finally { sem.Release(); }
+                    }, ct));
+                }
+                await Task.WhenAll(tasks);
+            }
+
+            // In Original-Reihenfolge anhängen (Parallelität ändert die Reihenfolge nicht).
+            foreach (var slot in lineSlots)
+                restResponseChapter.ResponseLineList.Add(slot ?? new RestResponseLine { LineJsonContent = "" });
 
             restResponseCourse.ChapterList.Add(restResponseChapter);
 
             // Random delay between chapter requests
             if (chapterIdx < course.Course.Data.Count - 1)
-                await Task.Delay(Random.Shared.Next(InterRequestDelayMinMs, InterRequestDelayMaxMs), ct);
+                await RandomDelayAsync(ct);
         }
 
         return (restResponseCourse, null);
@@ -506,18 +545,23 @@ public class ChessableHttpService : IChessableHttpService
 
     private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct)
     {
-        // Vor jedem Request prüfen, ob die VPN-IP rotiert werden soll (alle N Requests).
-        // Sequentieller, awaited Loop → die Rotation liegt garantiert ZWISCHEN zwei
-        // Requests, nie mitten in einem.
+        // Request bei der Rotation anmelden (zählt + rotiert ggf. die IP, NACHDEM alle
+        // laufenden Requests gedrained sind → kein IP-Wechsel mitten im Request, auch parallel).
         await _vpn.MaybeRotateAsync(ct);
+        try
+        {
+            // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
+            // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).
+            var uname = ChessableJwt.TryExtractUname(bearer);
+            using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
 
-        // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
-        // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).
-        var uname = ChessableJwt.TryExtractUname(bearer);
-        using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
-
-        var args = BuildGetArgs(url, bearer);
-        return await RunCurlAsync(args, null, url, endpoint, chessableUid, ct);
+            var args = BuildGetArgs(url, bearer);
+            return await RunCurlAsync(args, null, url, endpoint, chessableUid, ct);
+        }
+        finally
+        {
+            _vpn.RequestCompleted();   // Gegenstück zur In-Flight-Anmeldung in MaybeRotateAsync
+        }
     }
 
     private async Task<string> CurlPostAsync(string url, string body, string endpoint, string? chessableUid, CancellationToken ct)
