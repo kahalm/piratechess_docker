@@ -47,4 +47,8 @@ public class FakeChessableHttpService : IChessableHttpService
         };
         return Task.FromResult<(RestResponseCourse? data, string? error)>((course, null));
     }
+
+    public Task<(int? totalLines, string? error)> GetCourseLineCountAsync(
+        string bearer, string uid, string bid, CancellationToken ct = default)
+        => Task.FromResult<(int?, string?)>((0, null));
 }

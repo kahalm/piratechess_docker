@@ -219,6 +219,41 @@ public class ChessableHttpService : IChessableHttpService
         }
     }
 
+    /// <summary>
+    /// Leichte Vorab-Schätzung: nur die Kurs-Struktur (getCourse?includeVariations, EIN Request, KEINE
+    /// per-Linie-getGame-Abrufe) holen und die Varianten je Kapitel summieren → Gesamt-Linienzahl.
+    /// Für die „~N Linien · ~M min"-Anzeige in der Admin-Kursliste, bevor man importiert.
+    /// </summary>
+    public async Task<(int? totalLines, string? error)> GetCourseLineCountAsync(string bearer, string uid, string bid, CancellationToken ct = default)
+    {
+        using var _tag = LogContext.PushProperty("LogTags", "chessable,scrape");
+        var url = $"https://www.chessable.com/api/v1/getCourse?uid={uid}&bid={bid}&includeVariations=true";
+        string content = "";
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try { content = await CurlGetAsync(url, bearer, "course", uid, ct); }
+            catch (Exception ex)
+            {
+                if (attempt == 0) { await Task.Delay(ProxyRetryDelayMs, ct); continue; }
+                return (null, $"Failed to fetch course: {ex.Message}");
+            }
+            if (!string.IsNullOrWhiteSpace(content) && content != "{}") break;
+            if (attempt == 0) await Task.Delay(ProxyRetryDelayMs, ct);
+        }
+        if (string.IsNullOrWhiteSpace(content) || content == "{}") return (null, "Empty course response");
+        if (TryGetChessableErrorMessage(content) is { } apiError) return (null, apiError);
+        if (LooksLikeHtml(content)) return (null, ClassifyBlockedResponse(content, bearer));
+        try
+        {
+            var course = JsonSerializer.Deserialize<ResponseCourse>(content, JsonOpts);
+            if (course?.Course?.Data is null || course.Course.Data.Count == 0) return (null, "Course has no chapters");
+            var total = course.Course.Data.Sum(c => c.Variations.Count > 0 ? c.Variations.Count : c.Total);
+            return (total, null);
+        }
+        catch (Exception ex) { return (null, ex.Message); }
+    }
+
     /// <summary>True, wenn der Body offensichtlich HTML/XML statt JSON ist (erstes
     /// Nicht-Whitespace-Zeichen ist <c>&lt;</c>) — typisch für Login-Redirects,
     /// Cloudflare-Block- oder Proxy-Gateway-Seiten.</summary>

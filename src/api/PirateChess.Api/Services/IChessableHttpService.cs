@@ -19,4 +19,7 @@ public interface IChessableHttpService
         Action<string>? onRetry = null,
         Action<int>? onTotalLines = null,
         CancellationToken ct = default);
+
+    Task<(int? totalLines, string? error)> GetCourseLineCountAsync(
+        string bearer, string uid, string bid, CancellationToken ct = default);
 }

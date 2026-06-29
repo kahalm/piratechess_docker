@@ -20,6 +20,9 @@ public record DirectCourseResponse(string Bid, string Name, string Mode, int Cha
 // Async-Variante mit Fortschritt: /course/start liefert eine JobId, /course/{jobId} pollt
 // den Fortschritt (Kapitel/Linien) und liefert bei Status "completed" das fertige Pgn.
 public record DirectCourseStartResponse(string JobId);
+// Leichte Vorab-Schätzung (ohne tiefen Abruf): Gesamt-Linienzahl eines Kurses. Cached=true → aus dem
+// Rohdaten-Cache (kein Chessable-Call); sonst aus einem einzelnen getCourse?includeVariations.
+public record DirectCourseInfoResponse(string Bid, int TotalLines, bool Cached);
 public record DirectCourseProgressResponse(
     string Status,
     int ChaptersDone,

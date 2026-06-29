@@ -163,6 +163,31 @@ public class ChessableDirectController : ControllerBase
     public async Task<IActionResult> CachedBids(CancellationToken ct)
         => Ok(new { bids = (await _rawCache.GetAllCachedBidsAsync(ct)).ToList() });
 
+    /// <summary>Leichte Vorab-Schätzung der Gesamt-Linienzahl eines Kurses (für die Admin-Kursliste).
+    /// Gecacht → aus dem Rohdaten-Cache (kein Chessable-Call); sonst EIN getCourse?includeVariations.</summary>
+    [HttpPost("course/info")]
+    public async Task<IActionResult> CourseInfo([FromBody] DirectCourseRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Bearer))
+            return BadRequest(new { message = "Bearer is required" });
+        if (string.IsNullOrWhiteSpace(request.Bid))
+            return BadRequest(new { message = "Bid is required" });
+
+        // Gecacht → Gesamtzahl ohne Chessable-Abruf aus den Rohdaten.
+        var cached = await _rawCache.GetAsync(request.Bid, ct);
+        if (cached is not null)
+            return Ok(new DirectCourseInfoResponse(request.Bid, cached.ChapterList.Sum(c => c.ResponseLineList.Count), true));
+
+        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
+        if (uidError is not null)
+            return BadRequest(new { message = uidError });
+
+        var (total, error) = await _chessableHttp.GetCourseLineCountAsync(request.Bearer, uid, request.Bid, ct);
+        if (error is not null)
+            return BadRequest(new { message = error });
+        return Ok(new DirectCourseInfoResponse(request.Bid, total ?? 0, false));
+    }
+
     [HttpPost("course/start")]
     public IActionResult StartCourse([FromBody] DirectCourseRequest request)
     {
