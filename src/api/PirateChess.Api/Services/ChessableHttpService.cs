@@ -254,6 +254,31 @@ public class ChessableHttpService : IChessableHttpService
         catch (Exception ex) { return (null, ex.Message); }
     }
 
+    /// <summary>
+    /// Diagnose: holt GENAU eine Linie (getGame für eine oid) über den echten Abruf-Pfad
+    /// (curl-impersonate + VPN-Tunnel-Lease + Headers). Liefert Timing + ob die Antwort vollständig
+    /// (nicht leer/{}/Block) ist + einen Body-Anfang. Wirft nicht — Fehler kommen im error-Feld.
+    /// </summary>
+    public async Task<(bool ok, int bytes, long ms, string? error, string snippet)> DebugFetchLineAsync(
+        string bearer, string uid, int oid, CancellationToken ct = default)
+    {
+        var url = $"https://www.chessable.com/api/v1/getGame?lng=en&uid={uid}&oid={oid}";
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            var content = await CurlGetAsync(url, bearer, "line", uid, ct);
+            sw.Stop();
+            var ok = RawLineCache.IsComplete(content);
+            var snippet = content is null ? "" : content[..Math.Min(160, content.Length)];
+            return (ok, content?.Length ?? 0, sw.ElapsedMilliseconds, null, snippet);
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return (false, 0, sw.ElapsedMilliseconds, ex.Message, "");
+        }
+    }
+
     /// <summary>True, wenn der Body offensichtlich HTML/XML statt JSON ist (erstes
     /// Nicht-Whitespace-Zeichen ist <c>&lt;</c>) — typisch für Login-Redirects,
     /// Cloudflare-Block- oder Proxy-Gateway-Seiten.</summary>

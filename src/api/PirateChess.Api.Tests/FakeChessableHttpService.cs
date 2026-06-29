@@ -51,4 +51,8 @@ public class FakeChessableHttpService : IChessableHttpService
     public Task<(int? totalLines, string? error)> GetCourseLineCountAsync(
         string bearer, string uid, string bid, CancellationToken ct = default)
         => Task.FromResult<(int?, string?)>((0, null));
+
+    public Task<(bool ok, int bytes, long ms, string? error, string snippet)> DebugFetchLineAsync(
+        string bearer, string uid, int oid, CancellationToken ct = default)
+        => Task.FromResult<(bool, int, long, string?, string)>((true, 0, 0, null, ""));
 }

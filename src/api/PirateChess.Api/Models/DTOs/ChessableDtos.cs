@@ -20,6 +20,9 @@ public record DirectCourseResponse(string Bid, string Name, string Mode, int Cha
 // Async-Variante mit Fortschritt: /course/start liefert eine JobId, /course/{jobId} pollt
 // den Fortschritt (Kapitel/Linien) und liefert bei Status "completed" das fertige Pgn.
 public record DirectCourseStartResponse(string JobId);
+// Diagnose: eine einzelne Linie (getGame) über den echten Abruf-Pfad testen.
+public record DirectLineDebugRequest(string Bearer, int Oid);
+public record DirectLineDebugResponse(int Oid, string Uid, bool Ok, int Bytes, long Ms, string? Error, string Snippet);
 // Leichte Vorab-Schätzung (ohne tiefen Abruf): Gesamt-Linienzahl eines Kurses. Cached=true → aus dem
 // Rohdaten-Cache (kein Chessable-Call); sonst aus einem einzelnen getCourse?includeVariations.
 public record DirectCourseInfoResponse(string Bid, int TotalLines, bool Cached);

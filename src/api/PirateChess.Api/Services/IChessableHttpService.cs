@@ -22,4 +22,7 @@ public interface IChessableHttpService
 
     Task<(int? totalLines, string? error)> GetCourseLineCountAsync(
         string bearer, string uid, string bid, CancellationToken ct = default);
+
+    Task<(bool ok, int bytes, long ms, string? error, string snippet)> DebugFetchLineAsync(
+        string bearer, string uid, int oid, CancellationToken ct = default);
 }

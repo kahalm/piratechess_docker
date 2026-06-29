@@ -188,6 +188,24 @@ public class ChessableDirectController : ControllerBase
         return Ok(new DirectCourseInfoResponse(request.Bid, total ?? 0, false));
     }
 
+    /// <summary>Diagnose: holt GENAU eine Linie (getGame für eine oid) über den echten Abruf-Pfad
+    /// (curl-impersonate + VPN-Tunnel) und meldet Timing + ob die Antwort vollständig ist. Mehrfach
+    /// aufrufen reproduziert ggf. das Soft-Rate-Limit/den Block bei Linien-Abrufen unter Last.</summary>
+    [HttpPost("debug/line")]
+    public async Task<IActionResult> DebugLine([FromBody] DirectLineDebugRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Bearer))
+            return BadRequest(new { message = "Bearer is required" });
+        if (request.Oid <= 0)
+            return BadRequest(new { message = "Oid is required" });
+        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
+        if (uidError is not null)
+            return BadRequest(new { message = uidError });
+
+        var (ok, bytes, ms, error, snippet) = await _chessableHttp.DebugFetchLineAsync(request.Bearer, uid, request.Oid, ct);
+        return Ok(new DirectLineDebugResponse(request.Oid, uid, ok, bytes, ms, error, snippet));
+    }
+
     [HttpPost("course/start")]
     public IActionResult StartCourse([FromBody] DirectCourseRequest request)
     {
