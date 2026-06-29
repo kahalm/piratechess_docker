@@ -34,6 +34,12 @@ public class ChessableHttpService : IChessableHttpService
     // ein; jetzt schlägt er nach 30 s fehl → der Line-Retry (30 s Backoff) greift schnell.
     private const int CurlConnectTimeoutSec = 30;
 
+    // GESAMT-Timeout je Request (--max-time). Eine hängende IP lieferte den Body sonst erst nach
+    // 75–120 s (curl 56), was die serielle Pipeline blockierte. Jetzt bricht der Request nach ~20 s
+    // ab → leerer Body → als Soft-Block gewertet → IP retired/rotiert, Tunnel-Health zählt mit.
+    // Gesunde Abrufe (auch große Linien/Kapitel) sind <5 s. Konfigurierbar: Chessable:RequestMaxTimeSec.
+    private readonly int _requestMaxTimeSec;
+
     // Der Kapitel-Abruf (getList) hatte bisher weder Validierung noch Retry: ein mitten im
     // Stream abgebrochener Body (~8 KB-Truncation durch den VPN-Proxy) ist nicht-leer, aber
     // unvollständig → er parst NICHT als ResponseChapter, wurde aber truncated gecacht und ließ
@@ -99,6 +105,7 @@ public class ChessableHttpService : IChessableHttpService
         _delayMaxMs = Math.Max(_delayMinMs + 1, configuration.GetValue("Chessable:InterRequestDelayMaxMs", 200));
         _parallelLineFetches = Math.Clamp(configuration.GetValue("Chessable:ParallelLineFetches", 1), 1, 16);
         _blockRetryDelayMs = Math.Max(0, configuration.GetValue("Chessable:BlockRetryDelayMs", 1500));
+        _requestMaxTimeSec = Math.Clamp(configuration.GetValue("Chessable:RequestMaxTimeSec", 20), 5, 120);
     }
 
     /// <summary>Zufällige Inter-Request-Pause (0, wenn beide Delays 0). Nur nach echtem Request nötig.</summary>
@@ -638,7 +645,7 @@ public class ChessableHttpService : IChessableHttpService
         var uname = ChessableJwt.TryExtractUname(bearer);
         using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
 
-        var args = BuildGetArgs(url, bearer);
+        var args = BuildGetArgs(url, bearer, _requestMaxTimeSec);
         var result = await RunCurlAsync(args, null, url, endpoint, chessableUid, lease.ProxyUrl, ct);
 
         // IP-Soft-Block (leeres "{}"/leere Antwort trotz Transport-Erfolg): diese Ausgangs-IP ist
@@ -855,9 +862,10 @@ public class ChessableHttpService : IChessableHttpService
     /// als <c>"{url}"</c> in einen Args-String → ein <c>"</c> in der bid konnte z.B. <c>-o</c>/<c>--config</c>
     /// einschleusen und Dateien lesen/schreiben).
     /// </summary>
-    public static List<string> BuildGetArgs(string url, string bearer)
+    public static List<string> BuildGetArgs(string url, string bearer, int maxTimeSec = 20)
     {
-        var args = new List<string> { "-s", "-S", "--connect-timeout", CurlConnectTimeoutSec.ToString() };
+        var args = new List<string> { "-s", "-S", "--connect-timeout", CurlConnectTimeoutSec.ToString(),
+            "--max-time", maxTimeSec.ToString() };
         args.AddRange(TlsArgs);
         AddHeader(args, "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0");
         AddHeader(args, "accept: application/json, text/plain, */*");

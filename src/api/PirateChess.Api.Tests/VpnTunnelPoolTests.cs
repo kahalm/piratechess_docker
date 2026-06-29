@@ -69,7 +69,8 @@ public class VpnTunnelPoolTests
     public void VpnLease_DisposeAndBlock_FireCallbacksAtMostOnce()
     {
         int completed = 0, blocked = 0;
-        var lease = new VpnLease("http://p:8888", () => completed++, () => blocked++);
+        bool? completedBlockedFlag = null;
+        var lease = new VpnLease("http://p:8888", b => { completed++; completedBlockedFlag = b; }, () => blocked++);
 
         lease.ReportBlocked();
         lease.ReportBlocked();   // idempotent
@@ -78,14 +79,66 @@ public class VpnTunnelPoolTests
 
         Assert.Equal(1, blocked);
         Assert.Equal(1, completed);
+        Assert.True(completedBlockedFlag);   // Dispose meldet den blockierten Ausgang weiter
     }
 
     [Fact]
     public void VpnLease_NoBlockCallback_ReportBlockedIsNoop()
     {
-        var lease = new VpnLease("http://p:8888", () => { });   // onBlocked weggelassen
+        var lease = new VpnLease("http://p:8888", _ => { });   // onBlocked weggelassen
         lease.ReportBlocked();   // darf nicht werfen
         lease.Dispose();
+    }
+
+    private static VpnTunnel BuildTunnel(Dictionary<string, string?> settings)
+    {
+        var cfg = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        return new VpnTunnel("http://p:8888", "http://ctrl:8000", new FakeHttpClientFactory(),
+            cfg, NullLogger.Instance, index: 1, tunnelCount: 1);
+    }
+
+    [Fact]
+    public void Tunnel_CoolsDownAndDropsFromPool_AfterTooManyBlocks()
+    {
+        // Fenster 4, Schwelle 3 Blocks, Rotation hoch angesetzt (kein Budget-Wechsel stört).
+        var t = BuildTunnel(new()
+        {
+            ["Vpn:RotateAfterRequests"] = "1000",
+            ["Vpn:HealthWindow"] = "4",
+            ["Vpn:HealthBlockThreshold"] = "3",
+            ["Vpn:CooldownSec"] = "60",
+        });
+
+        Assert.True(t.TryAcquire());          // anfangs gesund
+        Assert.False(t.IsCoolingDown);
+
+        // 4 Ausgänge im Fenster, davon 3 blockiert → Schwelle erreicht → Cooldown.
+        t.RequestCompleted(blocked: true);
+        t.RequestCompleted(blocked: true);
+        t.RequestCompleted(blocked: false);
+        t.RequestCompleted(blocked: true);
+
+        Assert.True(t.IsCoolingDown);
+        Assert.False(t.TryAcquire());                       // abgekühlt → fällt aus dem Pool
+        Assert.True(t.TryAcquire(respectCooldown: false));  // Notfall-Pass nimmt ihn trotzdem
+    }
+
+    [Fact]
+    public void Tunnel_StaysHealthy_WhenBlocksBelowThreshold()
+    {
+        var t = BuildTunnel(new()
+        {
+            ["Vpn:RotateAfterRequests"] = "1000",
+            ["Vpn:HealthWindow"] = "4",
+            ["Vpn:HealthBlockThreshold"] = "3",
+            ["Vpn:CooldownSec"] = "60",
+        });
+        t.RequestCompleted(blocked: true);
+        t.RequestCompleted(blocked: false);
+        t.RequestCompleted(blocked: true);
+        t.RequestCompleted(blocked: false);   // nur 2/4 blockiert → unter Schwelle
+        Assert.False(t.IsCoolingDown);
+        Assert.True(t.TryAcquire());
     }
 
     [Fact]

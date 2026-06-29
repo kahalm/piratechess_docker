@@ -31,12 +31,14 @@ public interface IVpnRotationService
 public sealed class VpnLease : IDisposable
 {
     public string? ProxyUrl { get; }
-    private readonly Action _onComplete;
+    private readonly Action<bool> _onComplete;
     private readonly Action _onBlocked;
     private bool _completed;
     private bool _blocked;
 
-    public VpnLease(string? proxyUrl, Action onComplete, Action? onBlocked = null)
+    /// <param name="onComplete">Beim Dispose aufgerufen; bool = ob dieser Request (IP-)blockiert war
+    /// (für die Tunnel-Health-/Cooldown-Statistik).</param>
+    public VpnLease(string? proxyUrl, Action<bool> onComplete, Action? onBlocked = null)
     {
         ProxyUrl = proxyUrl;
         _onComplete = onComplete;
@@ -56,6 +58,6 @@ public sealed class VpnLease : IDisposable
     {
         if (_completed) return;
         _completed = true;
-        _onComplete();
+        _onComplete(_blocked);
     }
 }

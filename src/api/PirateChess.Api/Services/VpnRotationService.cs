@@ -49,16 +49,21 @@ public class VpnRotationService : IVpnRotationService
             ct.ThrowIfCancellationRequested();
             lock (_activeLock)
             {
-                // Beim aktiven Tunnel beginnen, dann der Reihe nach — der erste bereite gewinnt
-                // und wird zum aktiven (rotierende werden übersprungen).
-                for (var k = 0; k < _tunnels.Count; k++)
+                // Pass 0: bevorzugt GESUNDE Tunnel (Cooldown respektieren). Pass 1: falls alle abgekühlt,
+                // doch einen abgekühlten nehmen (rotierende bleiben tabu) — der Drain verhungert nie.
+                // Beim aktiven Tunnel beginnen, dann der Reihe nach; der erste bereite wird aktiv.
+                for (var pass = 0; pass < 2; pass++)
                 {
-                    var idx = (_active + k) % _tunnels.Count;
-                    var tunnel = _tunnels[idx];
-                    if (tunnel.TryAcquire())
+                    var respectCooldown = pass == 0;
+                    for (var k = 0; k < _tunnels.Count; k++)
                     {
-                        _active = idx;
-                        return new VpnLease(tunnel.ProxyUrl, tunnel.RequestCompleted, () => RetireAndAdvance(idx));
+                        var idx = (_active + k) % _tunnels.Count;
+                        var tunnel = _tunnels[idx];
+                        if (tunnel.TryAcquire(respectCooldown))
+                        {
+                            _active = idx;
+                            return new VpnLease(tunnel.ProxyUrl, tunnel.RequestCompleted, () => RetireAndAdvance(idx));
+                        }
                     }
                 }
             }

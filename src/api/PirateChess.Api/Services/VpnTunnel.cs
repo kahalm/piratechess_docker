@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -19,7 +20,9 @@ internal sealed class VpnTunnel
     private const int ProxyReadyPollAttempts = 8;
     private const int ProxyReadyPollDelayMs = 1000;
     private const int ProxyProbeTimeoutMs = 5000;
-    private const int DrainTimeoutMs = 60000;
+    // Da ein Request jetzt per --max-time (~20 s) hart begrenzt ist, drainen wir nicht mehr 60 s:
+    // ein hängender Request bricht selbst nach ~20 s ab → InFlight fällt, Rotation läuft zügig.
+    private const int DrainTimeoutMs = 25000;
     private const int DrainPollMs = 25;
 
     public string? ProxyUrl { get; }
@@ -33,10 +36,19 @@ internal sealed class VpnTunnel
     private readonly string _label;
     private readonly HttpClient? _probeClient;   // durch DIESEN Tunnel-Proxy (für Readiness-Probe)
 
+    // Tunnel-Health: Fenster der letzten N Request-Ausgänge (true = blockiert/Hänger). Blockt ein
+    // Tunnel über das Fenster zu oft, fliegt er für eine Cooldown-Zeit GANZ aus dem aktiven Pool
+    // (nicht nur die IP rotieren) → der Drain läuft solange nur über gesunde Tunnel.
+    private readonly int _healthWindow;
+    private readonly int _healthBlockThreshold;
+    private readonly int _cooldownMs;
+
     private readonly object _lock = new();
     private volatile bool _rotating;
     private int _requestCount;
     private int _inFlight;
+    private readonly Queue<bool> _recent = new();
+    private DateTime _cooldownUntil = DateTime.MinValue;
 
     public VpnTunnel(string? proxyUrl, string? controlUrl, IHttpClientFactory httpClientFactory,
         IConfiguration cfg, ILogger logger, int index, int tunnelCount)
@@ -49,6 +61,10 @@ internal sealed class VpnTunnel
 
         _rotateAfter = cfg.GetValue("Vpn:RotateAfterRequests", 20);
         if (_rotateAfter < 1) _rotateAfter = 20;
+
+        _healthWindow = Math.Max(2, cfg.GetValue("Vpn:HealthWindow", 8));
+        _healthBlockThreshold = Math.Clamp(cfg.GetValue("Vpn:HealthBlockThreshold", 5), 1, _healthWindow);
+        _cooldownMs = Math.Max(0, cfg.GetValue("Vpn:CooldownSec", 120)) * 1000;
 
         // Stagger: Start-Zähler pro Tunnel versetzen, damit die Tunnel NICHT gleichzeitig rotieren
         // (sonst stehen bei round-robin alle zugleich → Stall). Tunnel i (0-basiert) startet bei
@@ -78,12 +94,16 @@ internal sealed class VpnTunnel
     /// Rotation IM HINTERGRUND anstoßen (der auslösende Request läuft noch auf der aktuellen IP weiter
     /// — er ist der RotateAfter-te und damit noch erlaubt) und <c>true</c> zurückgeben. So wartet KEIN
     /// Request je auf eine Rotation: während ein Tunnel rotiert, liefert der/die andere(n) weiter.</summary>
-    public bool TryAcquire()
+    /// <param name="respectCooldown">true = ein wegen zu vieler Blocks „abgekühlter" Tunnel wird
+    /// abgelehnt (fällt aus dem Pool). Der Pool ruft im Notfall (alle abgekühlt) mit false nach,
+    /// damit der Drain nie ganz verhungert.</param>
+    public bool TryAcquire(bool respectCooldown = true)
     {
         if (!_enabled) return true;          // ohne Control-Server: keine Rotation, kein Tracking
         lock (_lock)
         {
             if (_rotating) return false;     // rotiert gerade → Pool soll anderen Tunnel nehmen
+            if (respectCooldown && _cooldownUntil > DateTime.UtcNow) return false; // abgekühlt → raus
             Interlocked.Increment(ref _inFlight);
             _requestCount++;
             if (_requestCount >= _rotateAfter)
@@ -127,11 +147,37 @@ internal sealed class VpnTunnel
         finally { _rotating = false; }
     }
 
-    /// <summary>Gegenstück zu <see cref="TryAcquire"/> (im Dispose des Lease): Request als fertig melden.</summary>
-    public void RequestCompleted()
+    /// <summary>Gegenstück zu <see cref="TryAcquire"/> (im Dispose des Lease): Request als fertig melden.
+    /// <paramref name="blocked"/> = ob er (IP-)blockiert/getimeoutet war → fließt in die Tunnel-Health.</summary>
+    public void RequestCompleted(bool blocked = false)
     {
         if (!_enabled) return;
         Interlocked.Decrement(ref _inFlight);
+        RecordOutcome(blocked);
+    }
+
+    /// <summary>true, solange dieser Tunnel wegen zu vieler Blocks abgekühlt ist (Diagnose).</summary>
+    public bool IsCoolingDown { get { lock (_lock) return _cooldownUntil > DateTime.UtcNow; } }
+
+    /// <summary>Schiebt den Ausgang ins Health-Fenster; überschreitet die Block-Zahl im Fenster die
+    /// Schwelle, kühlt der Tunnel ab (fällt für die Cooldown-Zeit aus dem Pool).</summary>
+    private void RecordOutcome(bool blocked)
+    {
+        lock (_lock)
+        {
+            _recent.Enqueue(blocked);
+            while (_recent.Count > _healthWindow) _recent.Dequeue();
+            if (_cooldownMs <= 0 || _cooldownUntil > DateTime.UtcNow) return; // aus / schon abgekühlt
+            if (_recent.Count < _healthWindow) return;
+            var blocks = _recent.Count(b => b);
+            if (blocks >= _healthBlockThreshold)
+            {
+                _cooldownUntil = DateTime.UtcNow.AddMilliseconds(_cooldownMs);
+                _recent.Clear();
+                _logger.LogWarning("{Label}: {Blocks}/{Window} Requests blockiert — Cooldown {Sec}s, faellt aus dem Pool",
+                    _label, blocks, _healthWindow, _cooldownMs / 1000);
+            }
+        }
     }
 
     private async Task DrainInFlightAsync(CancellationToken ct)
