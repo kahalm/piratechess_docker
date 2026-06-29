@@ -19,6 +19,17 @@ namespace piratechess_lib
     public class Chapter
     {
         public int Id { get; set; }
+        /// <summary>Anzahl Varianten des Kapitels (Chessable-Feld "total"). Nur gefüllt, wenn der
+        /// getCourse-Abruf mit includeVariations=true erfolgte; sonst 0.</summary>
+        public int Total { get; set; }
+        /// <summary>Varianten des Kapitels (oid/Typ) — nur bei includeVariations=true. Summe der
+        /// Counts über alle Kapitel = Gesamt-Linienzahl des Kurses (= Zahl der getGame-Abrufe).</summary>
+        public List<ChapterVariation> Variations { get; set; } = [];
+    }
+    public class ChapterVariation
+    {
+        public long Oid { get; set; }
+        public string Type { get; set; } = string.Empty;
     }
     public class ResponseLine
     {

@@ -198,7 +198,7 @@ public class ChessableDirectController : ControllerBase
         // "completed, aber Pgn noch null"-Race vor dem Remove).
         var s = job.Snapshot();
         var dto = new DirectCourseProgressResponse(
-            s.Status, s.ChaptersDone, s.ChaptersTotal, s.LinesDone,
+            s.Status, s.ChaptersDone, s.ChaptersTotal, s.LinesDone, s.LinesTotal,
             s.ChapterCount, s.LineCount, s.CourseName,
             s.Status == "completed" ? s.Pgn : null, s.Error);
 
@@ -244,7 +244,8 @@ public class ChessableDirectController : ControllerBase
                             onCumulativeLines: total =>
                             {
                                 if (int.TryParse(total.Trim(), out var l)) job.LinesDone = l;
-                            });
+                            },
+                            onTotalLines: t => job.LinesTotal = t);
 
                         if (fetchError is not null)
                         {
@@ -263,6 +264,7 @@ public class ChessableDirectController : ControllerBase
                 job.ChaptersTotal = data.ChapterList.Count;
                 job.ChaptersDone = data.ChapterList.Count;
                 job.LinesDone = data.ChapterList.Sum(c => c.ResponseLineList.Count);
+                job.LinesTotal = job.LinesDone; // gecacht/fertig → vollständige Zahl
             }
 
             var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
@@ -274,9 +276,9 @@ public class ChessableDirectController : ControllerBase
             }
 
             var (pgn, courseName) = await Task.Run(() => lib.GetCourse(bid, useLocalData: true));
-            job.Complete(pgn, courseName,
-                data?.ChapterList.Count ?? 0,
-                data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0);
+            var lnCount = data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0;
+            if (lnCount > job.LinesTotal) job.LinesTotal = lnCount; // tatsächliche Zahl ist autoritativ
+            job.Complete(pgn, courseName, data?.ChapterList.Count ?? 0, lnCount);
         }
         catch (Exception ex)
         {

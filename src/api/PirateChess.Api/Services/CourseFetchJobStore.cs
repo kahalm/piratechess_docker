@@ -17,6 +17,9 @@ public class CourseFetchJob
     public int ChaptersDone { get; set; }
     public int ChaptersTotal { get; set; }
     public int LinesDone { get; set; }
+    /// <summary>Gesamt-Linienzahl (aus getCourse?includeVariations), bekannt schon zu Beginn des
+    /// Abrufs → Fortschritts-Nenner + ETA. 0 solange unbekannt.</summary>
+    public int LinesTotal { get; set; }
     public int ChapterCount { get; set; }
     public int LineCount { get; set; }
     public string CourseName { get; set; } = string.Empty;
@@ -55,10 +58,10 @@ public class CourseFetchJob
     }
 
     /// <summary>Konsistenter Schnappschuss für den Poll-Read (Status + zugehörige Felder zusammenhängend).</summary>
-    public (string Status, int ChaptersDone, int ChaptersTotal, int LinesDone, int ChapterCount, int LineCount, string CourseName, string? Pgn, string? Error) Snapshot()
+    public (string Status, int ChaptersDone, int ChaptersTotal, int LinesDone, int LinesTotal, int ChapterCount, int LineCount, string CourseName, string? Pgn, string? Error) Snapshot()
     {
         lock (_gate)
-            return (Status, ChaptersDone, ChaptersTotal, LinesDone, ChapterCount, LineCount, CourseName, Pgn, Error);
+            return (Status, ChaptersDone, ChaptersTotal, LinesDone, LinesTotal, ChapterCount, LineCount, CourseName, Pgn, Error);
     }
 }
 

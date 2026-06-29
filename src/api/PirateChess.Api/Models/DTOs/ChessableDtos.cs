@@ -25,6 +25,7 @@ public record DirectCourseProgressResponse(
     int ChaptersDone,
     int ChaptersTotal,
     int LinesDone,
+    int LinesTotal,
     int ChapterCount,
     int LineCount,
     string? CourseName,

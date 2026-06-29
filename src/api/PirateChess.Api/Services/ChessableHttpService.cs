@@ -312,6 +312,7 @@ public class ChessableHttpService : IChessableHttpService
         Action<string>? onLineProgress = null,
         Action<string>? onCumulativeLines = null,
         Action<string>? onRetry = null,
+        Action<int>? onTotalLines = null,
         CancellationToken ct = default)
     {
         // Alle Lifecycle-Logs dieses Scrapes (Retries/Warnungen/Per-Request) für die
@@ -322,7 +323,10 @@ public class ChessableHttpService : IChessableHttpService
         //    VPN-Rotation kurz 503 (CONNECT tunnel failed). Anders als der Line-Fetch
         //    hatte dieser Aufruf bisher keinen Retry → ein einziges 503 ließ den
         //    ganzen Import mit "Empty course response" scheitern. Daher bounded Retry.
-        var courseUrl = $"https://www.chessable.com/api/v1/getCourse?uid={uid}&bid={bid}";
+        // includeVariations=true → die getCourse-Antwort enthält je Kapitel die Varianten(-Liste) inkl.
+        // Anzahl → wir kennen die Gesamt-Linienzahl SOFORT (vor den teuren getGame-Abrufen) für
+        // Fortschritt/ETA. Ändert die gecachte Kurs-Rohdaten (größer); der Parser ignoriert Zusatzfelder.
+        var courseUrl = $"https://www.chessable.com/api/v1/getCourse?uid={uid}&bid={bid}&includeVariations=true";
         string courseContent = "";
         for (int attempt = 0; attempt < CourseFetchAttempts; attempt++)
         {
@@ -382,6 +386,11 @@ public class ChessableHttpService : IChessableHttpService
 
         if (course?.Course?.Data is null || course.Course.Data.Count == 0)
             return (null, "Course has no chapters");
+
+        // Gesamt-Linienzahl direkt aus der getCourse-Antwort (includeVariations) melden — bekannt
+        // VOR den teuren per-Linie-getGame-Abrufen. Summe der Varianten je Kapitel (Fallback: "total").
+        var totalLines = course.Course.Data.Sum(c => c.Variations.Count > 0 ? c.Variations.Count : c.Total);
+        if (totalLines > 0) onTotalLines?.Invoke(totalLines);
 
         var restResponseCourse = new RestResponseCourse
         {
