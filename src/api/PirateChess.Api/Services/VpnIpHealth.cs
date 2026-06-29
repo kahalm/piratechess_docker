@@ -3,13 +3,19 @@ namespace PirateChess.Api.Services;
 /// <summary>
 /// Buchführung pro VPN-Ausgangs-IP über ALLE Tunnel/Rotationen hinweg: wie viele Requests liefen
 /// über die IP und wie viele waren blockiert/getimeoutet. Eine „Stint" = die Lebensdauer einer IP
-/// zwischen zwei Rotationen; sie wird per <see cref="RecordStint"/> gemeldet. Eine IP, die mehrfach
-/// mit hoher Block-Rate auffällt, wird als „wiederholt schlecht" geloggt (WARN). <see cref="Snapshot"/>
-/// liefert die Tabelle für eine Ad-hoc-Auswertung (Debug-Endpoint /direct/debug/ip-health).
+/// zwischen zwei Rotationen; sie wird per <see cref="RecordStint"/> gemeldet.
+///
+/// „Wiederholt schlecht" wird an der KUMULATIVEN Per-IP-Block-Rate festgemacht (über genug
+/// Requests), NICHT an gezählten Mini-Phasen — sonst flaggt ein einzelner Block in einem kurzen
+/// Stint (1 von 2 Requests = 50 %) eine in Wahrheit gesunde IP. Eine Phase zählt deshalb nur als
+/// „schlecht", wenn sie groß genug war (<c>Vpn:BadStintMinRequests</c>), und der WARN feuert erst,
+/// wenn die IP über <c>Vpn:BadIpMinRequests</c> hinweg eine Block-Rate ≥ <c>Vpn:BadIpBlockRate</c>
+/// hält (gedrosselt, nicht pro Stint). <see cref="Snapshot"/> liefert die Tabelle für eine
+/// Ad-hoc-Auswertung (Debug-Endpoint /direct/debug/ip-health).
 /// </summary>
 public sealed class VpnIpHealth
 {
-    public sealed record IpStat(string Ip, long Requests, long Blocks, int Stints, int BadStints, DateTime LastSeenUtc)
+    public sealed record IpStat(string Ip, long Requests, long Blocks, int Stints, int BadStints, bool RecurringBad, DateTime LastSeenUtc)
     {
         public double BlockRate => Requests > 0 ? (double)Blocks / Requests : 0;
     }
@@ -20,18 +26,28 @@ public sealed class VpnIpHealth
         public long Blocks;
         public int Stints;
         public int BadStints;
+        public int LastWarnedStint;
         public DateTime LastSeenUtc;
     }
+
+    // Re-WARN frühestens nach so vielen weiteren Stints, sobald eine IP einmal geflaggt wurde.
+    private const int ReWarnEveryStints = 20;
 
     private readonly Dictionary<string, Counter> _byIp = new();
     private readonly object _lock = new();
     private readonly ILogger<VpnIpHealth> _logger;
     private readonly double _badStintRate;
+    private readonly int _badStintMinRequests;
+    private readonly int _badIpMinRequests;
+    private readonly double _badIpBlockRate;
 
     public VpnIpHealth(IConfiguration cfg, ILogger<VpnIpHealth> logger)
     {
         _logger = logger;
         _badStintRate = Math.Clamp(cfg.GetValue("Vpn:BadStintRate", 0.4), 0.05, 1.0);
+        _badStintMinRequests = Math.Clamp(cfg.GetValue("Vpn:BadStintMinRequests", 5), 1, 1000);
+        _badIpMinRequests = Math.Clamp(cfg.GetValue("Vpn:BadIpMinRequests", 50), 1, 100000);
+        _badIpBlockRate = Math.Clamp(cfg.GetValue("Vpn:BadIpBlockRate", 0.15), 0.01, 1.0);
     }
 
     /// <summary>Meldet die abgeschlossene Lebensdauer einer IP: <paramref name="requests"/> Requests,
@@ -40,8 +56,11 @@ public sealed class VpnIpHealth
     {
         if (string.IsNullOrWhiteSpace(ip) || requests <= 0) return;
 
-        var stintBad = (double)blocks / requests >= _badStintRate;
-        long totReq, totBlk; int badStints, stints;
+        // Eine Phase zählt nur als „schlecht", wenn sie statistisch belastbar war: genug Requests
+        // UND hohe Block-Rate. Ein einzelner Block in 1–2 Requests ist Rauschen, kein Indiz.
+        var stintBad = requests >= _badStintMinRequests && (double)blocks / requests >= _badStintRate;
+
+        long totReq, totBlk; int badStints, stints; bool warn;
         lock (_lock)
         {
             if (!_byIp.TryGetValue(ip, out var c)) { c = new Counter(); _byIp[ip] = c; }
@@ -51,6 +70,11 @@ public sealed class VpnIpHealth
             if (stintBad) c.BadStints++;
             c.LastSeenUtc = DateTime.UtcNow;
             totReq = c.Requests; totBlk = c.Blocks; badStints = c.BadStints; stints = c.Stints;
+
+            // „Wiederholt schlecht": die IP hält über genug Requests eine zu hohe Gesamt-Block-Rate.
+            var recurringBad = totReq >= _badIpMinRequests && (double)totBlk / totReq >= _badIpBlockRate;
+            warn = recurringBad && (c.LastWarnedStint == 0 || stints - c.LastWarnedStint >= ReWarnEveryStints);
+            if (warn) c.LastWarnedStint = stints;
         }
 
         // Strukturiert (ip/requests/blocked als Felder) → in Kibana je IP gruppier-/aggregierbar.
@@ -58,20 +82,26 @@ public sealed class VpnIpHealth
             "VPN-IP-Stint ip={Ip} requests={Req} blocked={Blk} rate={Rate:P0}; kumuliert {TotReq}/{TotBlk}, {Bad}/{Stints} schlechte Phasen",
             ip, requests, blocks, (double)blocks / requests, totReq, totBlk, badStints, stints);
 
-        if (stintBad && badStints >= 2)
+        if (warn)
             _logger.LogWarning(
-                "VPN-IP {Ip} WIEDERHOLT SCHLECHT: {Bad} schlechte Phasen (von {Stints}), gesamt {TotReq} Requests / {TotBlk} blockiert ({Rate:P0})",
-                ip, badStints, stints, totReq, totBlk, (double)totBlk / totReq);
+                "VPN-IP {Ip} WIEDERHOLT SCHLECHT: Gesamt-Block-Rate {Rate:P0} über {TotReq} Requests ({TotBlk} blockiert, {Bad}/{Stints} schlechte Phasen)",
+                ip, (double)totBlk / totReq, totReq, totBlk, badStints, stints);
     }
 
-    /// <summary>Aktuelle Per-IP-Statistik (schlechteste zuerst) für eine Ad-hoc-Auswertung.</summary>
+    /// <summary>Aktuelle Per-IP-Statistik (höchste Block-Rate zuerst) für eine Ad-hoc-Auswertung.</summary>
     public IReadOnlyList<IpStat> Snapshot()
     {
         lock (_lock)
         {
             return _byIp
-                .Select(kv => new IpStat(kv.Key, kv.Value.Requests, kv.Value.Blocks, kv.Value.Stints, kv.Value.BadStints, kv.Value.LastSeenUtc))
-                .OrderByDescending(s => s.BadStints)
+                .Select(kv =>
+                {
+                    var c = kv.Value;
+                    var recurringBad = c.Requests >= _badIpMinRequests && (double)c.Blocks / c.Requests >= _badIpBlockRate;
+                    return new IpStat(kv.Key, c.Requests, c.Blocks, c.Stints, c.BadStints, recurringBad, c.LastSeenUtc);
+                })
+                .OrderByDescending(s => s.RecurringBad)
+                .ThenByDescending(s => s.BlockRate)
                 .ThenByDescending(s => s.Blocks)
                 .ToList();
         }
