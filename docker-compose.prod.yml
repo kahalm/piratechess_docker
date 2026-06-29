@@ -14,6 +14,10 @@ services:
       WIREGUARD_PRESHARED_KEY: ${WIREGUARD_PRESHARED_KEY}
       WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES}
       SERVER_COUNTRIES: ${VPN_SERVER_COUNTRIES}
+      # Optionale Server-Einschränkung. ⚠️ VPN_SERVER_NAMES MUSS komma-getrennt OHNE
+      # Leerzeichen sein ("A,B,C", nicht "A, B, C") — gluetun trimmt nicht, sonst matcht
+      # nur der erste Name und der Tunnel rotiert nie wirklich (Details in .env.example).
+      SERVER_NAMES: ${VPN_SERVER_NAMES}
       HTTPPROXY: "on"
       # Control-Server (:8000) für piratechess-api erreichbar machen → IP-Rotation.
       # 8888 = HTTP-Proxy muss mit aufgeführt bleiben.
