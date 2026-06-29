@@ -2,14 +2,16 @@ namespace PirateChess.Api.Services;
 
 /// <summary>
 /// Verwaltet einen Pool aus 1..n gluetun-VPN-Tunneln (je eigener HTTP-Proxy + IP-Rotation).
-/// Requests werden round-robin über die Tunnel verteilt; pro Request liefert <see cref="AcquireAsync"/>
-/// ein <see cref="VpnLease"/> mit dem zu nutzenden Proxy. Mit nur einem Tunnel = bisheriges Verhalten.
+/// Es ist immer GENAU EIN Tunnel aktiv; Requests laufen sticky über ihn, bis er sein Request-Budget
+/// erreicht ODER einen IP-Soft-Block meldet (<see cref="VpnLease.ReportBlocked"/>). Dann wird er im
+/// Hintergrund rotiert (drain-aware) und der nächste, bereits ausgeruhte Tunnel wird aktiv
+/// (Ping-Pong). Mit nur einem Tunnel = bisheriges Verhalten.
 /// </summary>
 public interface IVpnRotationService
 {
-    /// <summary>Wählt den nächsten Tunnel (round-robin), zählt ihn mit / rotiert ihn bei Bedarf
-    /// (drain-aware) und liefert ein Lease: <see cref="VpnLease.ProxyUrl"/> für den Request, und
-    /// <see cref="VpnLease.Dispose"/> (im finally) meldet den Request als fertig.</summary>
+    /// <summary>Liefert ein Lease auf den aktiven Tunnel (überspringt gerade rotierende). <see cref="VpnLease.ProxyUrl"/>
+    /// ist der zu nutzende Proxy; <see cref="VpnLease.Dispose"/> (im finally) meldet den Request als fertig;
+    /// <see cref="VpnLease.ReportBlocked"/> retired die aktive IP sofort (Hintergrund-Rotation + Wechsel).</summary>
     Task<VpnLease> AcquireAsync(CancellationToken ct = default);
 
     /// <summary>Erzwingt sofort eine Rotation ALLER Tunnel (manueller Trigger / Test); liefert die
@@ -22,17 +24,32 @@ public interface IVpnRotationService
 
 /// <summary>Leiht einen Tunnel für genau einen Request. <see cref="ProxyUrl"/> ist der zu nutzende
 /// Proxy (oder null = direkt). <see cref="Dispose"/> meldet den Request beim Tunnel als beendet
-/// (genau einmal) — im <c>finally</c> aufrufen, damit die drain-aware Rotation korrekt zählt.</summary>
+/// (genau einmal) — im <c>finally</c> aufrufen, damit die drain-aware Rotation korrekt zählt.
+/// <see cref="ReportBlocked"/> signalisiert einen IP-Soft-Block (leere <c>{}</c>-Antwort) → die
+/// aktive IP wird sofort retired (Hintergrund-Rotation) und der Pool wechselt auf den nächsten
+/// Tunnel; der Aufrufer muss dann nur kurz (statt 30 s) zurückfallen und neu acquiren.</summary>
 public sealed class VpnLease : IDisposable
 {
     public string? ProxyUrl { get; }
     private readonly Action _onComplete;
+    private readonly Action _onBlocked;
     private bool _completed;
+    private bool _blocked;
 
-    public VpnLease(string? proxyUrl, Action onComplete)
+    public VpnLease(string? proxyUrl, Action onComplete, Action? onBlocked = null)
     {
         ProxyUrl = proxyUrl;
         _onComplete = onComplete;
+        _onBlocked = onBlocked ?? (static () => { });
+    }
+
+    /// <summary>Meldet diesen Request als (IP-)blockiert → der Tunnel retired/rotiert sofort.
+    /// Idempotent (höchstens einmal wirksam pro Lease).</summary>
+    public void ReportBlocked()
+    {
+        if (_blocked) return;
+        _blocked = true;
+        _onBlocked();
     }
 
     public void Dispose()

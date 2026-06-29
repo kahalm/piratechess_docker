@@ -3,9 +3,10 @@ using System.Text.Json;
 namespace PirateChess.Api.Services;
 
 /// <summary>
-/// Pool aus einem oder mehreren <see cref="VpnTunnel"/>n. Verteilt Chessable-Requests round-robin
-/// über die Tunnel (jeder = eigener gluetun-Proxy + eigene IP-Rotation), damit während ein Tunnel
-/// rotiert ein anderer weiterliefern kann (→ höherer Durchsatz, Rotation aus dem kritischen Pfad).
+/// Pool aus einem oder mehreren <see cref="VpnTunnel"/>n. Es ist immer GENAU EIN Tunnel aktiv;
+/// Requests laufen sticky über ihn, bis er sein Request-Budget erreicht ODER einen IP-Soft-Block
+/// meldet. Dann rotiert er im Hintergrund (drain-aware) und der nächste, bereits ausgeruhte Tunnel
+/// wird aktiv (Ping-Pong: während A liefert, rotiert B auf eine frische IP und ist beim Wechsel fertig).
 ///
 /// Konfiguration: <c>Chessable:ProxyUrls</c> + <c>Gluetun:ControlUrls</c> (komma-getrennt, paarweise
 /// per Index). Fallback auf die Einzelwerte <c>Chessable:ProxyUrl</c>/<c>Gluetun:ControlUrl</c> →
@@ -17,7 +18,8 @@ public class VpnRotationService : IVpnRotationService
     public const string ClientName = "GluetunControl";
 
     private readonly List<VpnTunnel> _tunnels;
-    private int _rr = -1;
+    private readonly object _activeLock = new();
+    private int _active;   // Index des aktuell aktiven Tunnels (sticky)
 
     public VpnRotationService(IHttpClientFactory httpClientFactory, IConfiguration configuration, ILogger<VpnRotationService> logger)
     {
@@ -35,22 +37,45 @@ public class VpnRotationService : IVpnRotationService
         logger.LogInformation("VPN-Tunnel-Pool: {Count} Tunnel", _tunnels.Count);
     }
 
-    /// <summary>Wählt den nächsten Tunnel (round-robin), zählt/rotiert ihn und liefert ein Lease,
-    /// dessen Proxy für den Request zu nutzen ist; <c>Dispose</c> meldet den Request als fertig.</summary>
+    /// <summary>Liefert ein Lease auf den AKTIVEN Tunnel (sticky). Ist er gerade am Rotieren, rückt
+    /// die Suche auf den nächsten bereiten Tunnel und macht ihn aktiv. Erreicht der aktive Tunnel
+    /// dabei sein Budget, stößt <see cref="VpnTunnel.TryAcquire"/> die Hintergrund-Rotation an und der
+    /// nächste Acquire wechselt automatisch. <see cref="VpnLease.ReportBlocked"/> retired ihn sofort.
+    /// Nur falls (sehr selten) ALLE rotieren: kurz warten und erneut versuchen.</summary>
     public async Task<VpnLease> AcquireAsync(CancellationToken ct = default)
     {
-        // Round-robin, aber rotierende Tunnel überspringen → der Request läuft auf einem bereiten
-        // Tunnel statt an dessen Rotation zu warten. Mit Stagger rotiert höchstens einer, also ist
-        // immer einer frei. Nur falls (sehr selten) ALLE rotieren: kurz warten und erneut versuchen.
-        for (var attempt = 0; ; attempt++)
+        while (true)
         {
-            for (var k = 0; k < _tunnels.Count; k++)
+            ct.ThrowIfCancellationRequested();
+            lock (_activeLock)
             {
-                var tunnel = _tunnels[(int)((uint)Interlocked.Increment(ref _rr) % (uint)_tunnels.Count)];
-                if (tunnel.TryAcquire())
-                    return new VpnLease(tunnel.ProxyUrl, tunnel.RequestCompleted);
+                // Beim aktiven Tunnel beginnen, dann der Reihe nach — der erste bereite gewinnt
+                // und wird zum aktiven (rotierende werden übersprungen).
+                for (var k = 0; k < _tunnels.Count; k++)
+                {
+                    var idx = (_active + k) % _tunnels.Count;
+                    var tunnel = _tunnels[idx];
+                    if (tunnel.TryAcquire())
+                    {
+                        _active = idx;
+                        return new VpnLease(tunnel.ProxyUrl, tunnel.RequestCompleted, () => RetireAndAdvance(idx));
+                    }
+                }
             }
             await Task.Delay(50, ct);
+        }
+    }
+
+    /// <summary>Retired den (geblockten) Tunnel <paramref name="idx"/> sofort: Hintergrund-Rotation
+    /// auf eine frische IP + aktiven Zeiger auf den nächsten Tunnel rücken, damit der nächste Acquire
+    /// nicht erneut die verbrannte IP zieht.</summary>
+    private void RetireAndAdvance(int idx)
+    {
+        lock (_activeLock)
+        {
+            _tunnels[idx].RetireNow();
+            if (_active == idx)
+                _active = (idx + 1) % _tunnels.Count;
         }
     }
 

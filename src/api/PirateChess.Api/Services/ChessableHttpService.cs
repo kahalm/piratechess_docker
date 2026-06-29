@@ -49,9 +49,16 @@ public class ChessableHttpService : IChessableHttpService
     private readonly int _delayMinMs;
     private readonly int _delayMaxMs;
     // Wie viele Zeilen eines Kapitels parallel geholt werden (Chessable:ParallelLineFetches).
-    // 1 = altes serielles Verhalten. >1 beschleunigt; die VPN-Rotation ist drain-aware, wechselt
+    // 1 = sequenzielles Verhalten (Default). >1 beschleunigt; die VPN-Rotation ist drain-aware, wechselt
     // also die IP nie mitten in einem laufenden Request (siehe VpnRotationService).
     private readonly int _parallelLineFetches;
+
+    // Backoff vor dem Wiederholungs-Fetch einer leer/{}-geblockten Linie. Früher fix 30 s — das war
+    // mit Abstand der größte Zeitfresser (~6 % der Zeilen blocken → ~1,8 s/Zeile amortisiert). Jetzt
+    // retired ein Block die IP SOFORT (lease.ReportBlocked → Tunnel rotiert + Pool wechselt), der
+    // Retry läuft auf der frischen IP → es genügt ein kurzer Backoff. Konfigurierbar via
+    // Chessable:BlockRetryDelayMs.
+    private readonly int _blockRetryDelayMs;
 
     // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
     private const string TlsFlags =
@@ -85,10 +92,13 @@ public class ChessableHttpService : IChessableHttpService
         // which add their own browser headers causing duplicates)
         _curlPath = "/usr/local/bin/curl-impersonate-chrome";
 
-        // Speed-Stellschrauben (per ENV justierbar; Defaults = bisheriges Verhalten):
-        _delayMinMs = Math.Max(0, configuration.GetValue("Chessable:InterRequestDelayMinMs", 1000));
-        _delayMaxMs = Math.Max(_delayMinMs + 1, configuration.GetValue("Chessable:InterRequestDelayMaxMs", 2000));
+        // Speed-Stellschrauben (per ENV justierbar). Der Block ist requests-pro-IP-getrieben, NICHT
+        // timing-getrieben (Prod-Messung) → der Inter-Request-Delay dient kaum der Block-Vermeidung;
+        // Default daher klein gehalten (Block-Vermeidung läuft über die IP-Rotation).
+        _delayMinMs = Math.Max(0, configuration.GetValue("Chessable:InterRequestDelayMinMs", 0));
+        _delayMaxMs = Math.Max(_delayMinMs + 1, configuration.GetValue("Chessable:InterRequestDelayMaxMs", 200));
         _parallelLineFetches = Math.Clamp(configuration.GetValue("Chessable:ParallelLineFetches", 1), 1, 16);
+        _blockRetryDelayMs = Math.Max(0, configuration.GetValue("Chessable:BlockRetryDelayMs", 1500));
     }
 
     /// <summary>Zufällige Inter-Request-Pause (0, wenn beide Delays 0). Nur nach echtem Request nötig.</summary>
@@ -478,8 +488,11 @@ public class ChessableHttpService : IChessableHttpService
 
                         if (attempt < 9)
                         {
+                            // Der Block hat die IP bereits retired (ReportBlocked in CurlGetAsync) → der
+                            // nächste CurlGetAsync läuft auf einem frischen Tunnel. Daher nur kurzer
+                            // Backoff statt der früheren 30 s (größter Zeitfresser des Imports).
                             onRetry?.Invoke($"[{round}] Retry {attempt + 1}/10 ...");
-                            await Task.Delay(30000 + Random.Shared.Next(0, 5000), ct);
+                            await Task.Delay(_blockRetryDelayMs + Random.Shared.Next(0, 500), ct);
                         }
                         else
                         {
@@ -557,8 +570,21 @@ public class ChessableHttpService : IChessableHttpService
         using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
 
         var args = BuildGetArgs(url, bearer);
-        return await RunCurlAsync(args, null, url, endpoint, chessableUid, lease.ProxyUrl, ct);
+        var result = await RunCurlAsync(args, null, url, endpoint, chessableUid, lease.ProxyUrl, ct);
+
+        // IP-Soft-Block (leeres "{}"/leere Antwort trotz Transport-Erfolg): diese Ausgangs-IP ist
+        // verbrannt → sofort retiren (Tunnel rotiert im Hintergrund, Pool wechselt auf den nächsten,
+        // bereits ausgeruhten Tunnel). Der Aufrufer fällt dann nur kurz zurück und holt die Linie auf
+        // der frischen IP — statt 30 s auf derselben heißen IP zu warten.
+        if (IsSoftBlockedBody(result))
+            lease.ReportBlocked();
+
+        return result;
     }
+
+    /// <summary>True, wenn die Antwort ein IP-Soft-Block ist: leer oder nur <c>{}</c> (Länge ≤ 2)
+    /// trotz erfolgreichem Transport — Chessables Signatur für eine request-rate-geblockte IP.</summary>
+    internal static bool IsSoftBlockedBody(string? body) => string.IsNullOrEmpty(body) || body.Length <= 2;
 
     private async Task<string> CurlPostAsync(string url, string body, string endpoint, string? chessableUid, CancellationToken ct)
     {

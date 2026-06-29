@@ -23,18 +23,38 @@ public class VpnTunnelPoolTests
     }
 
     [Fact]
-    public async Task Acquire_TwoProxies_RoundRobins()
+    public async Task Acquire_Sticky_StaysOnActiveTunnel()
     {
+        // Ohne ControlUrls ist die Rotation deaktiviert → kein Budget-Wechsel; der aktive Tunnel
+        // bleibt sticky (kein round-robin mehr). Alle Requests laufen über denselben Proxy, bis
+        // ein Block ihn retired (siehe nächster Test).
         var svc = Build(new() { ["Chessable:ProxyUrls"] = "http://a:8888,http://b:8888" });
-        var p1 = (await svc.AcquireAsync()).ProxyUrl;
-        var p2 = (await svc.AcquireAsync()).ProxyUrl;
-        var p3 = (await svc.AcquireAsync()).ProxyUrl;
-        var p4 = (await svc.AcquireAsync()).ProxyUrl;
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync()).ProxyUrl);
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync()).ProxyUrl);
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync()).ProxyUrl);
+    }
 
-        Assert.Equal("http://a:8888", p1);
-        Assert.Equal("http://b:8888", p2);
-        Assert.Equal("http://a:8888", p3);
-        Assert.Equal("http://b:8888", p4);
+    [Fact]
+    public async Task Acquire_ReportBlocked_SwitchesToNextTunnel()
+    {
+        // Ein gemeldeter Soft-Block retired die aktive IP → der Pool rückt auf den nächsten Tunnel
+        // (und beim erneuten Block wieder zurück = Ping-Pong). Ohne ControlUrl ist die eigentliche
+        // Rotation ein No-op, der aktive Zeiger rückt aber trotzdem (Lastverteilung).
+        var svc = Build(new() { ["Chessable:ProxyUrls"] = "http://a:8888,http://b:8888" });
+
+        var l1 = await svc.AcquireAsync();
+        Assert.Equal("http://a:8888", l1.ProxyUrl);
+        l1.ReportBlocked();   // a verbrannt → wechsel auf b
+        l1.Dispose();
+
+        Assert.Equal("http://b:8888", (await svc.AcquireAsync()).ProxyUrl);   // jetzt aktiv: b
+
+        var l3 = await svc.AcquireAsync();
+        Assert.Equal("http://b:8888", l3.ProxyUrl);   // sticky auf b
+        l3.ReportBlocked();   // b verbrannt → zurück auf a
+        l3.Dispose();
+
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync()).ProxyUrl);
     }
 
     [Fact]
@@ -43,6 +63,29 @@ public class VpnTunnelPoolTests
         var svc = Build(new() { ["Chessable:ProxyUrl"] = "http://only:8888" });
         Assert.Equal("http://only:8888", (await svc.AcquireAsync()).ProxyUrl);
         Assert.Equal("http://only:8888", (await svc.AcquireAsync()).ProxyUrl);
+    }
+
+    [Fact]
+    public void VpnLease_DisposeAndBlock_FireCallbacksAtMostOnce()
+    {
+        int completed = 0, blocked = 0;
+        var lease = new VpnLease("http://p:8888", () => completed++, () => blocked++);
+
+        lease.ReportBlocked();
+        lease.ReportBlocked();   // idempotent
+        lease.Dispose();
+        lease.Dispose();         // idempotent
+
+        Assert.Equal(1, blocked);
+        Assert.Equal(1, completed);
+    }
+
+    [Fact]
+    public void VpnLease_NoBlockCallback_ReportBlockedIsNoop()
+    {
+        var lease = new VpnLease("http://p:8888", () => { });   // onBlocked weggelassen
+        lease.ReportBlocked();   // darf nicht werfen
+        lease.Dispose();
     }
 
     [Fact]
@@ -100,7 +143,10 @@ public class VpnTunnelPoolTests
             ["Chessable:ProxyUrl"] = "http://single:8888",
             ["Chessable:ProxyUrls"] = "http://x:8888,http://y:8888",
         });
-        var got = new[] { (await svc.AcquireAsync()).ProxyUrl, (await svc.AcquireAsync()).ProxyUrl };
-        Assert.Equal(new[] { "http://x:8888", "http://y:8888" }, got);
+        // Die Liste gewinnt über den Einzelwert (2 Tunnel); sticky → erster aktiver ist x.
+        var l1 = await svc.AcquireAsync();
+        Assert.Equal("http://x:8888", l1.ProxyUrl);
+        l1.ReportBlocked(); l1.Dispose();        // wechsel auf y
+        Assert.Equal("http://y:8888", (await svc.AcquireAsync()).ProxyUrl);
     }
 }

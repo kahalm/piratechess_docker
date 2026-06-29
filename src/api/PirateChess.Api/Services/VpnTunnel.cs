@@ -99,6 +99,21 @@ internal sealed class VpnTunnel
     /// <summary>true, solange dieser Tunnel gerade rotiert (Diagnose).</summary>
     public bool IsRotating => _rotating;
 
+    /// <summary>Erzwingt eine sofortige Hintergrund-Rotation (z. B. nach einem erkannten IP-Soft-Block),
+    /// auch wenn das Request-Budget noch nicht erreicht ist. Drain-aware (wartet auf 0 laufende Requests,
+    /// inkl. dem auslösenden). No-op, wenn schon am Rotieren oder Rotation deaktiviert.</summary>
+    public void RetireNow()
+    {
+        if (!_enabled) return;
+        lock (_lock)
+        {
+            if (_rotating) return;
+            _requestCount = 0;
+            _rotating = true;
+            _ = RotateInBackgroundAsync();   // fire-and-forget: erst drainen, dann IP wechseln
+        }
+    }
+
     /// <summary>Hintergrund-Rotation: wartet bis die laufenden Requests (inkl. dem Auslöser) fertig
     /// sind (drain), wechselt dann die IP. Währenddessen liefert <see cref="TryAcquire"/> false.</summary>
     private async Task RotateInBackgroundAsync()

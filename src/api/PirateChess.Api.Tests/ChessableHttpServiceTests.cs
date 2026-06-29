@@ -6,6 +6,27 @@ namespace PirateChess.Api.Tests;
 
 public class ChessableHttpServiceTests
 {
+    // --- IP-Soft-Block-Erkennung (leeres {} → IP retiren + rotieren statt 30s warten) ---
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("{}")]
+    [InlineData("  ")]   // 2 Zeichen
+    public void IsSoftBlockedBody_EmptyOrBrace_ReturnsTrue(string? body)
+    {
+        Assert.True(ChessableHttpService.IsSoftBlockedBody(body));
+    }
+
+    [Theory]
+    [InlineData("{\"game\":{}}")]
+    [InlineData("[1,2,3]")]
+    [InlineData("<html>")]   // HTML ist KEIN Soft-Block (eigene Klassifikation)
+    public void IsSoftBlockedBody_RealPayload_ReturnsFalse(string body)
+    {
+        Assert.False(ChessableHttpService.IsSoftBlockedBody(body));
+    }
+
     // --- Transienter Proxy-Ausfall (Fix: gluetun :8888 liefert beim VPN-Reconnect 503) ---
 
     [Fact]
