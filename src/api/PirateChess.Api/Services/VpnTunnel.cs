@@ -43,16 +43,24 @@ internal sealed class VpnTunnel
     private readonly int _healthBlockThreshold;
     private readonly int _cooldownMs;
 
+    private readonly VpnIpHealth? _ipHealth;
+
     private readonly object _lock = new();
     private volatile bool _rotating;
     private int _requestCount;
     private int _inFlight;
     private readonly Queue<bool> _recent = new();
     private DateTime _cooldownUntil = DateTime.MinValue;
+    // Per-IP-Buchführung: aktuelle Ausgangs-IP + Requests/Blocks SEIT der letzten Rotation. Beim
+    // Rotieren wird die Stint an VpnIpHealth gemeldet (→ wiederkehrend schlechte IPs sichtbar machen).
+    private string? _currentIp;
+    private int _ipRequests;
+    private int _ipBlocks;
 
     public VpnTunnel(string? proxyUrl, string? controlUrl, IHttpClientFactory httpClientFactory,
-        IConfiguration cfg, ILogger logger, int index, int tunnelCount)
+        IConfiguration cfg, ILogger logger, int index, int tunnelCount, VpnIpHealth? ipHealth = null)
     {
+        _ipHealth = ipHealth;
         ProxyUrl = string.IsNullOrWhiteSpace(proxyUrl) ? null : proxyUrl;
         _controlUrl = string.IsNullOrWhiteSpace(controlUrl) ? null : controlUrl.TrimEnd('/');
         _httpClientFactory = httpClientFactory;
@@ -105,6 +113,7 @@ internal sealed class VpnTunnel
             if (_rotating) return false;     // rotiert gerade → Pool soll anderen Tunnel nehmen
             if (respectCooldown && _cooldownUntil > DateTime.UtcNow) return false; // abgekühlt → raus
             Interlocked.Increment(ref _inFlight);
+            Interlocked.Increment(ref _ipRequests);   // Requests über die AKTUELLE IP zählen
             _requestCount++;
             if (_requestCount >= _rotateAfter)
             {
@@ -159,10 +168,20 @@ internal sealed class VpnTunnel
     /// <summary>true, solange dieser Tunnel wegen zu vieler Blocks abgekühlt ist (Diagnose).</summary>
     public bool IsCoolingDown { get { lock (_lock) return _cooldownUntil > DateTime.UtcNow; } }
 
+    /// <summary>Schließt die Buchführung der aktuellen IP ab (Requests/Blocks → VpnIpHealth) und setzt
+    /// die Per-IP-Zähler zurück. Wird beim Rotieren aufgerufen (vor dem IP-Wechsel).</summary>
+    private void FlushIpStint()
+    {
+        var req = Interlocked.Exchange(ref _ipRequests, 0);
+        var blk = Interlocked.Exchange(ref _ipBlocks, 0);
+        _ipHealth?.RecordStint(_currentIp, req, blk);
+    }
+
     /// <summary>Schiebt den Ausgang ins Health-Fenster; überschreitet die Block-Zahl im Fenster die
     /// Schwelle, kühlt der Tunnel ab (fällt für die Cooldown-Zeit aus dem Pool).</summary>
     private void RecordOutcome(bool blocked)
     {
+        if (blocked) Interlocked.Increment(ref _ipBlocks);   // Blocks der AKTUELLEN IP zählen
         lock (_lock)
         {
             _recent.Enqueue(blocked);
@@ -220,6 +239,10 @@ internal sealed class VpnTunnel
         bool needsRestart = false;
         try
         {
+            // Lebensdauer der NOCH aktiven IP abschließen (Requests/Blocks melden) → wiederkehrend
+            // schlechte IPs werden über VpnIpHealth sichtbar.
+            FlushIpStint();
+
             _logger.LogInformation("{Label}: Rotating VPN IP...", _label);
             needsRestart = true;
             await PutVpnStatusAsync(client, statusUrl, """{"status":"stopped"}""", ct);
@@ -228,6 +251,7 @@ internal sealed class VpnTunnel
             needsRestart = false;
 
             var newIp = await PollPublicIpAsync(client, ct);
+            _currentIp = newIp;   // ab jetzt zählen Requests/Blocks auf die neue IP
             _logger.LogInformation("{Label}: VPN IP rotated → {NewIp}", _label, newIp ?? "(unbekannt)");
             await WaitForProxyReadyAsync(ct);
             return newIp;

@@ -19,19 +19,27 @@ public class ChessableDirectController : ControllerBase
     private readonly IChessableHttpService _chessableHttp;
     private readonly CourseFetchJobStore _jobStore;
     private readonly RawCourseCache _rawCache;
+    private readonly VpnIpHealth _ipHealth;
     private readonly ILogger<ChessableDirectController> _logger;
 
     public ChessableDirectController(
         IChessableHttpService chessableHttp,
         CourseFetchJobStore jobStore,
         RawCourseCache rawCache,
+        VpnIpHealth ipHealth,
         ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
         _jobStore = jobStore;
         _rawCache = rawCache;
+        _ipHealth = ipHealth;
         _logger = logger;
     }
+
+    /// <summary>Per-IP-Auswertung: wie viele Requests/Blocks pro VPN-Ausgangs-IP (über alle Rotationen),
+    /// schlechteste zuerst. Für „welche IP ist immer wieder schlecht".</summary>
+    [HttpGet("debug/ip-health")]
+    public IActionResult IpHealth() => Ok(_ipHealth.Snapshot());
 
     [HttpPost("test")]
     public async Task<IActionResult> Test([FromBody] DirectBearerRequest request, CancellationToken ct)

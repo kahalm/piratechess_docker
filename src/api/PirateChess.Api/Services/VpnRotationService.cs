@@ -21,7 +21,7 @@ public class VpnRotationService : IVpnRotationService
     private readonly object _activeLock = new();
     private int _active;   // Index des aktuell aktiven Tunnels (sticky)
 
-    public VpnRotationService(IHttpClientFactory httpClientFactory, IConfiguration configuration, ILogger<VpnRotationService> logger)
+    public VpnRotationService(IHttpClientFactory httpClientFactory, IConfiguration configuration, ILogger<VpnRotationService> logger, VpnIpHealth? ipHealth = null)
     {
         var proxyUrls = ParseList(configuration["Chessable:ProxyUrls"]) ?? SingleOrEmpty(configuration["Chessable:ProxyUrl"]);
         var controlUrls = ParseList(configuration["Gluetun:ControlUrls"]) ?? SingleOrEmpty(configuration["Gluetun:ControlUrl"]);
@@ -32,7 +32,7 @@ public class VpnRotationService : IVpnRotationService
         {
             var proxy = i < proxyUrls.Count ? proxyUrls[i] : null;
             var control = i < controlUrls.Count ? controlUrls[i] : null;
-            _tunnels.Add(new VpnTunnel(proxy, control, httpClientFactory, configuration, logger, i + 1, count));
+            _tunnels.Add(new VpnTunnel(proxy, control, httpClientFactory, configuration, logger, i + 1, count, ipHealth));
         }
         logger.LogInformation("VPN-Tunnel-Pool: {Count} Tunnel", _tunnels.Count);
     }

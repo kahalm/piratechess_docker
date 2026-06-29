@@ -140,6 +140,7 @@ builder.Services.AddHttpClient(VpnRotationService.ClientName, client =>
 builder.Services.AddChessableHttpClient(builder.Configuration);
 
 // VPN-IP-Rotation (gluetun) — teilt sich denselben gluetun wie der Crawler.
+builder.Services.AddSingleton<VpnIpHealth>();   // Per-IP-Request-/Block-Buchführung
 builder.Services.AddSingleton<IVpnRotationService, VpnRotationService>();
 
 // Chessable HTTP service (curl-impersonate for TLS fingerprint bypass)
