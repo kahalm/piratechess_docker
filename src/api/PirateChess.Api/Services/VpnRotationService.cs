@@ -128,11 +128,19 @@ public class VpnRotationService : IVpnRotationService
         }
     }
 
-    /// <summary>Rotiert ALLE Tunnel sofort (manueller Trigger); liefert die erste neue IP.</summary>
+    /// <summary>Rotiert alle Tunnel sofort (manueller Trigger); liefert die erste neue IP. SEQUENZIELL,
+    /// nicht parallel: würden alle Tunnel gleichzeitig stoppen/rotieren, lieferte für mehrere Sekunden
+    /// KEINER mehr und ein laufender Import friert ein (AcquireAsync dreht in der Warteschleife). Nacheinander
+    /// bleibt stets mindestens ein Tunnel verfügbar.</summary>
     public async Task<string?> RotateNowAsync(CancellationToken ct = default)
     {
-        var ips = await Task.WhenAll(_tunnels.Select(t => t.RotateNowAsync(ct)));
-        return ips.FirstOrDefault(ip => ip is not null);
+        string? firstNewIp = null;
+        foreach (var t in _tunnels)
+        {
+            var ip = await t.RotateNowAsync(ct);
+            firstNewIp ??= ip;
+        }
+        return firstNewIp;
     }
 
     /// <summary>Public-IP des ersten Tunnels (best-effort).</summary>

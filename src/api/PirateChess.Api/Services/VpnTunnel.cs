@@ -55,7 +55,7 @@ internal sealed class VpnTunnel
     private DateTime _cooldownUntil = DateTime.MinValue;
     // Per-IP-Buchführung: aktuelle Ausgangs-IP + Requests/Blocks SEIT der letzten Rotation. Beim
     // Rotieren wird die Stint an VpnIpHealth gemeldet (→ wiederkehrend schlechte IPs sichtbar machen).
-    private string? _currentIp;
+    private volatile string? _currentIp;
     private int _ipRequests;
     private int _ipBlocks;
 
@@ -163,8 +163,12 @@ internal sealed class VpnTunnel
     public void RequestCompleted(bool blocked = false)
     {
         if (!_enabled) return;
-        Interlocked.Decrement(ref _inFlight);
+        // ZUERST den Ausgang verbuchen (insb. _ipBlocks++), DANN _inFlight senken: sonst könnte der
+        // drain-aware Rotations-Task _inFlight==0 sehen und FlushIpStint (Exchange auf 0) ausführen,
+        // BEVOR der Block dieses Requests gezählt wurde → der auslösende Block landete auf der falschen
+        // (neuen) IP oder ginge verloren. Reihenfolge schließt dieses Zeitfenster.
         RecordOutcome(blocked);
+        Interlocked.Decrement(ref _inFlight);
     }
 
     /// <summary>true, solange dieser Tunnel wegen zu vieler Blocks abgekühlt ist (Diagnose).</summary>

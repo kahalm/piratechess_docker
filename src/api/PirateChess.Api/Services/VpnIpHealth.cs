@@ -40,6 +40,7 @@ public sealed class VpnIpHealth
     private readonly int _badStintMinRequests;
     private readonly int _badIpMinRequests;
     private readonly double _badIpBlockRate;
+    private readonly int _maxEntries;
 
     public VpnIpHealth(IConfiguration cfg, ILogger<VpnIpHealth> logger)
     {
@@ -48,6 +49,9 @@ public sealed class VpnIpHealth
         _badStintMinRequests = Math.Clamp(cfg.GetValue("Vpn:BadStintMinRequests", 5), 1, 1000);
         _badIpMinRequests = Math.Clamp(cfg.GetValue("Vpn:BadIpMinRequests", 50), 1, 100000);
         _badIpBlockRate = Math.Clamp(cfg.GetValue("Vpn:BadIpBlockRate", 0.15), 0.01, 1.0);
+        // Obergrenze gegen unbegrenztes Wachstum im langlebigen Prozess: bei aggressiver Rotation über
+        // einen großen Provider-IP-Pool sammeln sich sonst über Tage beliebig viele Einträge an.
+        _maxEntries = Math.Clamp(cfg.GetValue("Vpn:IpHealthMaxEntries", 1000), 50, 100000);
     }
 
     /// <summary>Meldet die abgeschlossene Lebensdauer einer IP: <paramref name="requests"/> Requests,
@@ -63,7 +67,13 @@ public sealed class VpnIpHealth
         long totReq, totBlk; int badStints, stints; bool warn;
         lock (_lock)
         {
-            if (!_byIp.TryGetValue(ip, out var c)) { c = new Counter(); _byIp[ip] = c; }
+            if (!_byIp.TryGetValue(ip, out var c))
+            {
+                c = new Counter();
+                _byIp[ip] = c;
+                // Bei Neuzugang ggf. die am längsten nicht gesehenen Einträge ausmisten (Cap halten).
+                if (_byIp.Count > _maxEntries) EvictOldest();
+            }
             c.Requests += requests;
             c.Blocks += blocks;
             c.Stints++;
@@ -86,6 +96,15 @@ public sealed class VpnIpHealth
             _logger.LogWarning(
                 "VPN-IP {Ip} WIEDERHOLT SCHLECHT: Gesamt-Block-Rate {Rate:P0} über {TotReq} Requests ({TotBlk} blockiert, {Bad}/{Stints} schlechte Phasen)",
                 ip, (double)totBlk / totReq, totReq, totBlk, badStints, stints);
+    }
+
+    /// <summary>Entfernt die am längsten nicht gesehenen Einträge, bis der Cap wieder eingehalten ist
+    /// (10 % Headroom, damit nicht bei jedem Neuzugang erneut ausgemistet wird). Aufruf unter <c>_lock</c>.</summary>
+    private void EvictOldest()
+    {
+        var target = _maxEntries - _maxEntries / 10;
+        foreach (var key in _byIp.OrderBy(kv => kv.Value.LastSeenUtc).Select(kv => kv.Key).Take(_byIp.Count - target).ToList())
+            _byIp.Remove(key);
     }
 
     /// <summary>Aktuelle Per-IP-Statistik (höchste Block-Rate zuerst) für eine Ad-hoc-Auswertung.</summary>

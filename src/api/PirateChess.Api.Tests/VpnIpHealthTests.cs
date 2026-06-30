@@ -8,7 +8,7 @@ public class VpnIpHealthTests
 {
     private static VpnIpHealth Build(
         double badStintRate = 0.4, int badStintMinRequests = 5,
-        int badIpMinRequests = 50, double badIpBlockRate = 0.15)
+        int badIpMinRequests = 50, double badIpBlockRate = 0.15, int maxEntries = 1000)
     {
         var ci = System.Globalization.CultureInfo.InvariantCulture;
         var cfg = new ConfigurationBuilder()
@@ -18,9 +18,23 @@ public class VpnIpHealthTests
                 ["Vpn:BadStintMinRequests"] = badStintMinRequests.ToString(ci),
                 ["Vpn:BadIpMinRequests"] = badIpMinRequests.ToString(ci),
                 ["Vpn:BadIpBlockRate"] = badIpBlockRate.ToString(ci),
+                ["Vpn:IpHealthMaxEntries"] = maxEntries.ToString(ci),
             })
             .Build();
         return new VpnIpHealth(cfg, NullLogger<VpnIpHealth>.Instance);
+    }
+
+    [Fact]
+    public void EvictsOldestEntries_WhenMaxEntriesExceeded()
+    {
+        var h = Build(maxEntries: 50);
+        // 200 verschiedene IPs melden → die Tabelle darf nicht unbegrenzt wachsen.
+        for (int i = 0; i < 200; i++)
+            h.RecordStint($"10.0.0.{i}", requests: 1, blocks: 0);
+
+        // Kern-Garantie (deterministisch): die Tabelle bleibt am Cap gedeckelt statt unbegrenzt zu wachsen.
+        var snap = h.Snapshot();
+        Assert.True(snap.Count <= 50, $"erwartet ≤ 50 Einträge, war {snap.Count}");
     }
 
     [Fact]
