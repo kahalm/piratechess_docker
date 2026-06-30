@@ -174,14 +174,14 @@ public class ChessableHttpService : IChessableHttpService
     }
 
     public async Task<(Dictionary<string, string>? courses, string? error)> GetCoursesAsync(
-        string bearer, string uid, CancellationToken ct = default)
+        string bearer, string uid, CancellationToken ct = default, int? pinnedTunnel = null)
     {
         var url = $"https://www.chessable.com/api/v1/getHomeData?uid={uid}&sortBookRowsBy=alphabetically&userLanguageShort=en";
 
         string content;
         try
         {
-            content = await CurlGetAsync(url, bearer, "courses", uid, ct);
+            content = await CurlGetAsync(url, bearer, "courses", uid, ct, pinnedTunnel);
         }
         catch (Exception ex)
         {
@@ -633,12 +633,15 @@ public class ChessableHttpService : IChessableHttpService
         return (restResponseCourse, null);
     }
 
-    private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct)
+    private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct, int? pinnedTunnel = null)
     {
         // Tunnel leihen: wählt round-robin einen VPN-Tunnel, zählt/rotiert ihn (drain-aware → kein
         // IP-Wechsel mitten im Request, auch parallel) und liefert dessen Proxy. Dispose im finally
-        // meldet den Request beim Tunnel als fertig.
-        using var lease = await _vpn.AcquireAsync(ct);
+        // meldet den Request beim Tunnel als fertig. Ist ein Tunnel gepinnt (Test), läuft der Request
+        // fix über GENAU diesen Tunnel statt über das round-robin.
+        using var lease = pinnedTunnel is int pinIdx
+            ? await _vpn.AcquireSpecificAsync(pinIdx, ct)
+            : await _vpn.AcquireAsync(ct);
 
         // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
         // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).

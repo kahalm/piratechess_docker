@@ -8,8 +8,10 @@ public interface IChessableHttpService
 
     (string uid, string? error) ExtractUidFromBearer(string jwt);
 
+    /// <param name="pinnedTunnel">Wenn gesetzt (0-basiert), läuft der Request fix über GENAU diesen
+    /// VPN-Tunnel (gezielter Test „über diesen VPN") statt über das round-robin; sonst wie bisher.</param>
     Task<(Dictionary<string, string>? courses, string? error)> GetCoursesAsync(
-        string bearer, string uid, CancellationToken ct = default);
+        string bearer, string uid, CancellationToken ct = default, int? pinnedTunnel = null);
 
     Task<(RestResponseCourse? data, string? error)> FetchCourseDataAsync(
         string bearer, string uid, string bid,

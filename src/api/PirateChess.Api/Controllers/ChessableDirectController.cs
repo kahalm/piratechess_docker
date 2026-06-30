@@ -20,6 +20,7 @@ public class ChessableDirectController : ControllerBase
     private readonly CourseFetchJobStore _jobStore;
     private readonly RawCourseCache _rawCache;
     private readonly VpnIpHealth _ipHealth;
+    private readonly IVpnRotationService _vpn;
     private readonly ILogger<ChessableDirectController> _logger;
 
     public ChessableDirectController(
@@ -27,12 +28,14 @@ public class ChessableDirectController : ControllerBase
         CourseFetchJobStore jobStore,
         RawCourseCache rawCache,
         VpnIpHealth ipHealth,
+        IVpnRotationService vpn,
         ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
         _jobStore = jobStore;
         _rawCache = rawCache;
         _ipHealth = ipHealth;
+        _vpn = vpn;
         _logger = logger;
     }
 
@@ -41,24 +44,44 @@ public class ChessableDirectController : ControllerBase
     [HttpGet("debug/ip-health")]
     public IActionResult IpHealth() => Ok(_ipHealth.Snapshot());
 
+    /// <summary>Liste der VPN-Tunnel im Pool (Index, Proxy, Status) — woraus der Pin-Test wählen kann.</summary>
+    [HttpGet("vpn/tunnels")]
+    public IActionResult Tunnels() => Ok(_vpn.DescribeTunnels());
+
+    /// <summary>Bearer-Test (getHomeData). Mit <c>TunnelIndex</c> (0-basiert) läuft der Test fix über
+    /// GENAU diesen VPN-Tunnel — für „funktioniert Chessable über genau diesen VPN / mit welcher Exit-IP".
+    /// Ohne <c>TunnelIndex</c> wie bisher über das round-robin.</summary>
     [HttpPost("test")]
     public async Task<IActionResult> Test([FromBody] DirectBearerRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request?.Bearer))
             return BadRequest(new { message = "Bearer is required" });
 
+        var pin = request.TunnelIndex;
+        if (pin is int idx && (idx < 0 || idx >= _vpn.TunnelCount))
+            return BadRequest(new { message = $"Ungültiger Tunnel-Index {idx}. Verfügbar: 0..{_vpn.TunnelCount - 1}." });
+
         var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
         if (uidError is not null)
             return BadRequest(new { message = uidError });
 
-        var (courses, error) = await _chessableHttp.GetCoursesAsync(request.Bearer, uid, ct);
+        var (courses, error) = await _chessableHttp.GetCoursesAsync(request.Bearer, uid, ct, pin);
         if (error is not null)
         {
             var cleanMessage = error.Trim() is "{}" or "" ? "Invalid bearer" : error;
             return BadRequest(new { message = cleanMessage });
         }
 
-        return Ok(new DirectTestResponse(uid, courses!.Count));
+        // Bei gepinntem Test zusätzlich melden, über welchen Tunnel + welche Exit-IP getestet wurde.
+        string? proxy = null, exitIp = null;
+        if (pin is int pinned)
+        {
+            proxy = _vpn.DescribeTunnels().FirstOrDefault(t => t.Index == pinned)?.ProxyUrl;
+            try { exitIp = await _vpn.GetTunnelPublicIpAsync(pinned, ct); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Exit-IP für Tunnel {Pin} nicht ermittelbar", pinned); }
+        }
+
+        return Ok(new DirectTestResponse(uid, courses!.Count, pin, proxy, exitIp));
     }
 
     [HttpPost("courses")]

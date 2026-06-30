@@ -71,6 +71,50 @@ public class VpnRotationService : IVpnRotationService
         }
     }
 
+    /// <summary>Lease auf GENAU einen Tunnel (0-basiert), unabhängig vom sticky round-robin und OHNE den
+    /// aktiven Zeiger zu verschieben → der Import-Pfad läuft unbeeinflusst weiter. Cooldown wird ignoriert
+    /// (manueller Pin-Test), eine laufende Rotation aber abgewartet (sonst liefe der Request mitten im
+    /// IP-Wechsel). <see cref="VpnLease.ReportBlocked"/> retired auch hier den getroffenen Tunnel.</summary>
+    public async Task<VpnLease> AcquireSpecificAsync(int index, CancellationToken ct = default)
+    {
+        if (index < 0 || index >= _tunnels.Count)
+            throw new ArgumentOutOfRangeException(nameof(index),
+                $"Tunnel-Index {index} außerhalb des gültigen Bereichs (0..{_tunnels.Count - 1}).");
+
+        var tunnel = _tunnels[index];
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (tunnel.TryAcquire(respectCooldown: false))
+                return new VpnLease(tunnel.ProxyUrl, tunnel.RequestCompleted, () => RetireAndAdvance(index));
+            await Task.Delay(50, ct);   // rotiert gerade → kurz warten und erneut versuchen
+        }
+    }
+
+    public int TunnelCount => _tunnels.Count;
+
+    public IReadOnlyList<VpnTunnelStatus> DescribeTunnels()
+    {
+        lock (_activeLock)
+        {
+            var list = new List<VpnTunnelStatus>(_tunnels.Count);
+            for (int i = 0; i < _tunnels.Count; i++)
+            {
+                var t = _tunnels[i];
+                list.Add(new VpnTunnelStatus(i, t.ProxyUrl, t.Label, i == _active, t.IsRotating, t.IsCoolingDown));
+            }
+            return list;
+        }
+    }
+
+    public Task<string?> GetTunnelPublicIpAsync(int index, CancellationToken ct = default)
+    {
+        if (index < 0 || index >= _tunnels.Count)
+            throw new ArgumentOutOfRangeException(nameof(index),
+                $"Tunnel-Index {index} außerhalb des gültigen Bereichs (0..{_tunnels.Count - 1}).");
+        return _tunnels[index].GetPublicIpAsync(ct);
+    }
+
     /// <summary>Retired den (geblockten) Tunnel <paramref name="idx"/> sofort: Hintergrund-Rotation
     /// auf eine frische IP + aktiven Zeiger auf den nächsten Tunnel rücken, damit der nächste Acquire
     /// nicht erneut die verbrannte IP zieht.</summary>

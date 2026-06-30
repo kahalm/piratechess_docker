@@ -69,6 +69,69 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
+    public async Task Test_WithValidTunnelIndex_PinsAndEchoesIndex()
+    {
+        var client = ClientWithServiceKey();
+
+        // Im Test-Config gibt es genau 1 Tunnel (Index 0, kein Proxy/Control) → Pin 0 ist gültig.
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/test",
+            new { Bearer = "some-valid-jwt", TunnelIndex = 0 });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<DirectTestResp>(JsonOpts);
+        Assert.Equal("12345", body!.Uid);
+        Assert.Equal(2, body.CourseCount);
+        Assert.Equal(0, body.TunnelIndex);   // der gewählte Tunnel wird zurückgemeldet
+    }
+
+    [Fact]
+    public async Task Test_WithOutOfRangeTunnelIndex_Returns400()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/test",
+            new { Bearer = "some-valid-jwt", TunnelIndex = 99 });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Test_WithoutTunnelIndex_DoesNotPin()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/test", new { Bearer = "some-valid-jwt" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<DirectTestResp>(JsonOpts);
+        Assert.Null(body!.TunnelIndex);   // ohne Pin: round-robin, kein Tunnel zurückgemeldet
+    }
+
+    [Fact]
+    public async Task Tunnels_ReturnsTunnelList()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.GetAsync("/api/chessable/direct/vpn/tunnels");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var tunnels = await response.Content.ReadFromJsonAsync<List<TunnelStatusResp>>(JsonOpts);
+        Assert.NotNull(tunnels);
+        Assert.NotEmpty(tunnels);
+        Assert.Equal(0, tunnels![0].Index);   // 0-basiert, passt zum Pin-Wert
+    }
+
+    [Fact]
+    public async Task Tunnels_MissingServiceKey_Returns401()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/api/chessable/direct/vpn/tunnels");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Test_InvalidBearer_Returns400()
     {
         var client = ClientWithServiceKey();
@@ -271,7 +334,8 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
 
     private record CachedBidsResp(List<string> Bids);
     private record CachedResp(bool Cached);
-    private record DirectTestResp(string Uid, int CourseCount);
+    private record DirectTestResp(string Uid, int CourseCount, int? TunnelIndex = null, string? TunnelProxy = null, string? ExitIp = null);
+    private record TunnelStatusResp(int Index, string? ProxyUrl, string Label, bool Active, bool Rotating, bool CoolingDown);
     private record CourseItem(string Bid, string Name);
     private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
     private record JobStartResp(string JobId);

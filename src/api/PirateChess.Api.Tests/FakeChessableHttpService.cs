@@ -21,9 +21,13 @@ public class FakeChessableHttpService : IChessableHttpService
         return ("12345", null);
     }
 
+    /// <summary>Letzter an GetCoursesAsync übergebener Pin-Index (für Assertions im Pin-Test).</summary>
+    public int? LastPinnedTunnel { get; private set; }
+
     public Task<(Dictionary<string, string>? courses, string? error)> GetCoursesAsync(
-        string bearer, string uid, CancellationToken ct = default)
+        string bearer, string uid, CancellationToken ct = default, int? pinnedTunnel = null)
     {
+        LastPinnedTunnel = pinnedTunnel;
         var courses = new Dictionary<string, string>
         {
             ["1001"] = "Test Course 1",

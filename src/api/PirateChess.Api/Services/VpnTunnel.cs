@@ -26,6 +26,8 @@ internal sealed class VpnTunnel
     private const int DrainPollMs = 25;
 
     public string? ProxyUrl { get; }
+    /// <summary>Anzeige-Label dieses Tunnels (z. B. „Tunnel#1") — für die Tunnel-Auswahl beim Pin-Test.</summary>
+    public string Label => _label;
     private readonly string? _controlUrl;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger _logger;

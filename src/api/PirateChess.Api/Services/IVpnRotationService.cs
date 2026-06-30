@@ -14,6 +14,22 @@ public interface IVpnRotationService
     /// <see cref="VpnLease.ReportBlocked"/> retired die aktive IP sofort (Hintergrund-Rotation + Wechsel).</summary>
     Task<VpnLease> AcquireAsync(CancellationToken ct = default);
 
+    /// <summary>Liefert ein Lease auf GENAU den Tunnel <paramref name="index"/> (0-basiert), unabhängig vom
+    /// sticky round-robin und ohne den aktiven Zeiger zu verschieben — für einen gezielten Test „über genau
+    /// diesen VPN". Ein Cooldown wird ignoriert (manueller Trigger), eine laufende Rotation aber abgewartet.
+    /// Wirft <see cref="ArgumentOutOfRangeException"/> bei ungültigem Index.</summary>
+    Task<VpnLease> AcquireSpecificAsync(int index, CancellationToken ct = default);
+
+    /// <summary>Anzahl der Tunnel im Pool (gültige Pin-Indizes: 0..Count-1).</summary>
+    int TunnelCount { get; }
+
+    /// <summary>Schnappschuss aller Tunnel (Index, Proxy, Status) — für die Tunnel-Auswahl beim Pin-Test.</summary>
+    IReadOnlyList<VpnTunnelStatus> DescribeTunnels();
+
+    /// <summary>Aktuelle Public-(Exit-)IP GENAU des Tunnels <paramref name="index"/> über dessen Control-Server
+    /// (best-effort, null wenn nicht ermittelbar). Wirft <see cref="ArgumentOutOfRangeException"/> bei ungültigem Index.</summary>
+    Task<string?> GetTunnelPublicIpAsync(int index, CancellationToken ct = default);
+
     /// <summary>Erzwingt sofort eine Rotation ALLER Tunnel (manueller Trigger / Test); liefert die
     /// erste neue Public-IP (oder null).</summary>
     Task<string?> RotateNowAsync(CancellationToken ct = default);
@@ -21,6 +37,11 @@ public interface IVpnRotationService
     /// <summary>Aktuelle Public-IP des ersten Tunnels (best-effort).</summary>
     Task<string?> GetPublicIpAsync(CancellationToken ct = default);
 }
+
+/// <summary>Diagnose-Schnappschuss eines Tunnels im Pool (für die Tunnel-Auswahl beim Pin-Test).
+/// <paramref name="Index"/> ist 0-basiert und der für <see cref="IVpnRotationService.AcquireSpecificAsync"/>
+/// erwartete Pin-Wert; <paramref name="ProxyUrl"/> unterscheidet die Anbieter (z. B. gluetun vs. gluetun-pia).</summary>
+public record VpnTunnelStatus(int Index, string? ProxyUrl, string Label, bool Active, bool Rotating, bool CoolingDown);
 
 /// <summary>Leiht einen Tunnel für genau einen Request. <see cref="ProxyUrl"/> ist der zu nutzende
 /// Proxy (oder null = direkt). <see cref="Dispose"/> meldet den Request beim Tunnel als beendet

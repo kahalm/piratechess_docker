@@ -7,8 +7,12 @@ public record CourseListItem(string Bid, string Name);
 // Service-to-service (rookhub → piratechess) DTOs for the stateless
 // /api/chessable/direct/* endpoints. The caller passes the Chessable bearer
 // per request; piratechess never persists it.
-public record DirectBearerRequest(string Bearer);
-public record DirectTestResponse(string Uid, int CourseCount);
+// TunnelIndex (optional, 0-basiert): wenn gesetzt, läuft der Test-Request fix über GENAU diesen
+// VPN-Tunnel (gezielter „über diesen VPN testen") statt über das round-robin. Nur vom /test-Endpoint
+// ausgewertet; /courses ignoriert ihn. Fehlt das Feld → null → bisheriges Verhalten.
+public record DirectBearerRequest(string Bearer, int? TunnelIndex = null);
+// Bei gepinntem Test zusätzlich, welcher Tunnel genutzt wurde + dessen Exit-IP (best-effort).
+public record DirectTestResponse(string Uid, int CourseCount, int? TunnelIndex = null, string? TunnelProxy = null, string? ExitIp = null);
 
 // Tiefer Kurs-Abruf für den rookhub-Import. Mode steuert die Trainingsannotation im PGN:
 //   "None"         → reines Repertoire-PGN (kein Trainingszug)         → rookhub-Repertoire

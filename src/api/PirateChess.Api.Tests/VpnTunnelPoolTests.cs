@@ -188,6 +188,56 @@ public class VpnTunnelPoolTests
         Assert.Equal(expectedOffset, offset);
     }
 
+    // --- Gezielter Pin auf einen bestimmten Tunnel (Test „über genau diesen VPN") ---
+
+    [Fact]
+    public async Task AcquireSpecific_PinsToGivenTunnel_RegardlessOfActive()
+    {
+        var svc = Build(new() { ["Chessable:ProxyUrls"] = "http://a:8888,http://b:8888" });
+
+        // Aktiv ist anfangs a (Index 0). AcquireSpecific(1) muss trotzdem b liefern …
+        var pinned = await svc.AcquireSpecificAsync(1);
+        Assert.Equal("http://b:8888", pinned.ProxyUrl);
+        pinned.Dispose();
+
+        // … und den sticky-Zeiger NICHT verschoben haben → das round-robin läuft weiter über a.
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync()).ProxyUrl);
+    }
+
+    [Fact]
+    public async Task AcquireSpecific_OutOfRange_Throws()
+    {
+        var svc = Build(new() { ["Chessable:ProxyUrls"] = "http://a:8888,http://b:8888" });
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => svc.AcquireSpecificAsync(-1));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => svc.AcquireSpecificAsync(2));
+    }
+
+    [Fact]
+    public void DescribeTunnels_ReportsIndicesProxiesAndActive()
+    {
+        var svc = Build(new() { ["Chessable:ProxyUrls"] = "http://a:8888,http://b:8888" });
+
+        var tunnels = svc.DescribeTunnels();
+        Assert.Equal(2, tunnels.Count);
+        Assert.Equal(2, svc.TunnelCount);
+
+        Assert.Equal(0, tunnels[0].Index);
+        Assert.Equal("http://a:8888", tunnels[0].ProxyUrl);
+        Assert.True(tunnels[0].Active);          // erster Tunnel ist initial aktiv
+
+        Assert.Equal(1, tunnels[1].Index);
+        Assert.Equal("http://b:8888", tunnels[1].ProxyUrl);
+        Assert.False(tunnels[1].Active);
+    }
+
+    [Fact]
+    public async Task GetTunnelPublicIp_NoControlUrl_ReturnsNull()
+    {
+        // Ohne Control-Server lässt sich die Exit-IP nicht ermitteln → null (best-effort), kein Wurf.
+        var svc = Build(new() { ["Chessable:ProxyUrls"] = "http://a:8888" });
+        Assert.Null(await svc.GetTunnelPublicIpAsync(0));
+    }
+
     [Fact]
     public async Task Acquire_ProxyUrlsList_OverridesSingleValue()
     {
