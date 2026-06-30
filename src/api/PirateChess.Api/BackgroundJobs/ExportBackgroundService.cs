@@ -41,19 +41,39 @@ public class ExportBackgroundService : BackgroundService
     {
         _logger.LogInformation("ExportBackgroundService started");
 
-        await foreach (var job in _queue.DequeueAllAsync(stoppingToken))
+        // Äußere Schleife, damit der Service auch einen Fehler aus der Enumeration selbst (Channel-Reader)
+        // überlebt: würde `await foreach … DequeueAllAsync` mit einer Nicht-Cancellation-Exception abbrechen,
+        // stürbe sonst ExecuteAsync endgültig und ALLE künftigen Export-Jobs blieben unbearbeitet bis zum
+        // Container-Neustart (vgl. „eingeschlafener Import"-Vorfall). Hier: loggen, kurz warten, weiterlesen.
+        while (!stoppingToken.IsCancellationRequested)
         {
-            // Den kompletten Kurs-Import (Persistieren + Erfolg/Fehler) für die zentrale
-            // Kibana-Filterung mit dem Domänen-Tag versehen → ECS `tags`.
-            using var _tagScope = LogContext.PushProperty("LogTags", "chessable,import");
             try
             {
-                await ProcessExportAsync(job, stoppingToken);
+                await foreach (var job in _queue.DequeueAllAsync(stoppingToken))
+                {
+                    // Den kompletten Kurs-Import (Persistieren + Erfolg/Fehler) für die zentrale
+                    // Kibana-Filterung mit dem Domänen-Tag versehen → ECS `tags`.
+                    using var _tagScope = LogContext.PushProperty("LogTags", "chessable,import");
+                    try
+                    {
+                        await ProcessExportAsync(job, stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Export job failed for ExportId {ExportId}", job.ExportId);
+                        await FailExportAsync(job, ex.Message);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;   // sauberer Shutdown
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Export job failed for ExportId {ExportId}", job.ExportId);
-                await FailExportAsync(job, ex.Message);
+                _logger.LogError(ex, "ExportBackgroundService queue loop crashed — restarting after backoff");
+                try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
+                catch (OperationCanceledException) { break; }
             }
         }
     }

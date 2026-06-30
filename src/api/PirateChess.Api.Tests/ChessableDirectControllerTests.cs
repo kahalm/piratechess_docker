@@ -298,10 +298,20 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     public async Task CourseCached_UnknownBid_ReturnsFalse()
     {
         var client = ClientWithServiceKey();
-        var response = await client.GetAsync("/api/chessable/direct/course/nope/cached");
+        // Gültiges (numerisches), aber nicht gecachtes bid → 200 mit cached=false.
+        var response = await client.GetAsync("/api/chessable/direct/course/999999/cached");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<CachedResp>(JsonOpts);
         Assert.False(body!.Cached);
+    }
+
+    [Fact]
+    public async Task CourseCached_NonNumericBid_Returns400()
+    {
+        var client = ClientWithServiceKey();
+        // Nicht-numerisches bid wird abgelehnt (verhindert u. a. den unbegrenzten Per-bid-Lock).
+        var response = await client.GetAsync("/api/chessable/direct/course/nope/cached");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]

@@ -210,8 +210,11 @@ public class ChessableHttpService : IChessableHttpService
             var response = JsonSerializer.Deserialize<ResponseChapterList>(content, JsonOpts)
                 ?? new ResponseChapterList();
             var courses = new Dictionary<string, string>();
+            // Indexer statt Add: liefert Chessable doppelte bids (oder mehrere unbefüllte mit Bid==0),
+            // würde Dictionary.Add mit „same key already added" werfen und die ganze Kursliste mit einer
+            // kryptischen Meldung scheitern lassen. Idempotent: letzter Eintrag gewinnt.
             foreach (var book in response.HomeData.BooksList)
-                courses.Add(book.Bid.ToString(), book.Name);
+                courses[book.Bid.ToString()] = book.Name;
             return (courses, null);
         }
         catch (JsonException)
@@ -722,8 +725,15 @@ public class ChessableHttpService : IChessableHttpService
                 process.StandardInput.Close();
             }
 
-            stdout = await process.StandardOutput.ReadToEndAsync(ct);
-            var stderr = await process.StandardError.ReadToEndAsync(ct);
+            // BEIDE Pipes gleichzeitig leeren: stdout ist hier riesig (Linien Ø ~210 KB, Kapitel ~500 KB).
+            // Würde stdout erst vollständig gelesen, bevor stderr drankommt, blockiert curl beim Schreiben
+            // auf eine volle stderr-Pipe (OS-Puffer ~64 KB), während wir auf stdout warten → Deadlock,
+            // den nur --max-time auflöst. Daher parallel lesen, dann auf Exit warten.
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+            var stderrTask = process.StandardError.ReadToEndAsync(ct);
+            await Task.WhenAll(stdoutTask, stderrTask);
+            stdout = await stdoutTask;
+            var stderr = await stderrTask;
 
             await process.WaitForExitAsync(ct);
             exitCode = process.ExitCode;

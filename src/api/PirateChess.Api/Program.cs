@@ -59,8 +59,19 @@ builder.Host.UseSerilog((context, services, configuration) =>
     }
 });
 
+// Pflicht-Konfiguration früh validieren → Fail-FAST beim Start statt erst beim ersten Request/Login.
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection not configured");
+var jwtSecret = builder.Configuration["Jwt:Secret"]
+    ?? throw new InvalidOperationException("Jwt:Secret not configured");
+if (Encoding.UTF8.GetBytes(jwtSecret).Length < 32)
+    throw new InvalidOperationException("Jwt:Secret must be at least 32 bytes for HMAC-SHA256");
+var jwtIssuer = builder.Configuration["Jwt:Issuer"]
+    ?? throw new InvalidOperationException("Jwt:Issuer not configured");
+var jwtAudience = builder.Configuration["Jwt:Audience"]
+    ?? throw new InvalidOperationException("Jwt:Audience not configured");
+
 // Database
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 var serverVersion = new MariaDbServerVersion(new Version(11, 0, 0));
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseMySql(connectionString, serverVersion));
@@ -75,10 +86,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Secret"]!)),
+            ValidIssuer = jwtIssuer,
+            ValidAudience = jwtAudience,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
             NameClaimType = ClaimTypes.NameIdentifier
         };
 
@@ -159,6 +169,7 @@ builder.Services.AddSignalR();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddProblemDetails();
 
 var app = builder.Build();
 
@@ -169,6 +180,11 @@ using (var scope = app.Services.CreateScope())
     if (db.Database.IsRelational())
         db.Database.Migrate();
 }
+
+// Globaler Exception-Handler als ERSTES Request-Middleware-Glied: ungefangene Exceptions werden zu
+// einer ProblemDetails-500-Antwort OHNE Stacktrace/Internas (bewusst in ALLEN Umgebungen — interner
+// Backend-Service, keine Developer-Exception-Page, kein Leak selbst bei versehentlichem Development-Env).
+app.UseExceptionHandler();
 
 if (app.Environment.IsDevelopment())
 {

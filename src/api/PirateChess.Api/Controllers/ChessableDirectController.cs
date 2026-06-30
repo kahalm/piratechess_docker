@@ -39,6 +39,12 @@ public class ChessableDirectController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>Chessable-Kurs-IDs sind numerisch. bid VOR Cache-Lock/Fetch gegen dieses Format prüfen:
+    /// verhindert, dass beliebige (ungültige) Strings einen Per-bid-Lock im <see cref="RawCourseCache"/>
+    /// anlegen (der nie aufgeräumt wird → langsames Leck) und teure Chessable-Abrufe auslösen.</summary>
+    private static bool IsValidBid(string? bid)
+        => !string.IsNullOrEmpty(bid) && bid.Length <= 12 && bid.All(char.IsAsciiDigit);
+
     /// <summary>Per-IP-Auswertung: wie viele Requests/Blocks pro VPN-Ausgangs-IP (über alle Rotationen),
     /// schlechteste zuerst. Für „welche IP ist immer wieder schlecht".</summary>
     [HttpGet("debug/ip-health")]
@@ -116,8 +122,8 @@ public class ChessableDirectController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(request?.Bearer))
             return BadRequest(new { message = "Bearer is required" });
-        if (string.IsNullOrWhiteSpace(request.Bid))
-            return BadRequest(new { message = "Bid is required" });
+        if (!IsValidBid(request.Bid))
+            return BadRequest(new { message = "Invalid bid" });
 
         var mode = string.IsNullOrWhiteSpace(request.Mode) ? "FirstKeyMove" : request.Mode;
         string[] validModes = ["AllKeyMoves", "FirstKeyMove", "None"];
@@ -186,7 +192,9 @@ public class ChessableDirectController : ControllerBase
     /// <summary>Ob die Rohdaten dieses Kurses schon gecacht sind (→ Import braucht keinen Chessable-Abruf).</summary>
     [HttpGet("course/{bid}/cached")]
     public async Task<IActionResult> CourseCached(string bid, CancellationToken ct)
-        => Ok(new { cached = await _rawCache.ExistsAsync(bid, ct) });
+        => IsValidBid(bid)
+            ? Ok(new { cached = await _rawCache.ExistsAsync(bid, ct) })
+            : BadRequest(new { message = "Invalid bid" });
 
     /// <summary>Alle gecachten Kurs-Bids auf einmal — rookhub reichert damit die Kursliste mit einem
     /// „gecacht/sofort verfügbar"-Flag an (1 Call statt N).</summary>
@@ -201,8 +209,8 @@ public class ChessableDirectController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(request?.Bearer))
             return BadRequest(new { message = "Bearer is required" });
-        if (string.IsNullOrWhiteSpace(request.Bid))
-            return BadRequest(new { message = "Bid is required" });
+        if (!IsValidBid(request.Bid))
+            return BadRequest(new { message = "Invalid bid" });
 
         // Gecacht → Gesamtzahl ohne Chessable-Abruf aus den Rohdaten.
         var cached = await _rawCache.GetAsync(request.Bid, ct);
@@ -242,8 +250,8 @@ public class ChessableDirectController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(request?.Bearer))
             return BadRequest(new { message = "Bearer is required" });
-        if (string.IsNullOrWhiteSpace(request.Bid))
-            return BadRequest(new { message = "Bid is required" });
+        if (!IsValidBid(request.Bid))
+            return BadRequest(new { message = "Invalid bid" });
 
         var mode = string.IsNullOrWhiteSpace(request.Mode) ? "FirstKeyMove" : request.Mode;
         string[] validModes = ["AllKeyMoves", "FirstKeyMove", "None"];

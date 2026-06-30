@@ -10,6 +10,18 @@ namespace PirateChess.Api.Tests;
 
 public class TestWebApplicationFactory : WebApplicationFactory<Program>
 {
+    // Die Startup-Pflichtprüfungen in Program.cs (ConnectionString/Jwt) laufen als FRÜHE Inline-Reads
+    // in WebApplication.CreateBuilder — die erreicht ConfigureAppConfiguration der Factory NICHT mehr.
+    // Umgebungsvariablen liest CreateBuilder dagegen sofort (Env-Provider, `__` → `:`). Einmal je Prozess.
+    static TestWebApplicationFactory()
+    {
+        Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection",
+            "Server=localhost;Database=test;Uid=test;Pwd=test;");
+        Environment.SetEnvironmentVariable("Jwt__Secret", "TestSecretKeyThatIsAtLeast32CharsLong!!");
+        Environment.SetEnvironmentVariable("Jwt__Issuer", "TestIssuer");
+        Environment.SetEnvironmentVariable("Jwt__Audience", "TestAudience");
+    }
+
     private readonly string _dbName = "TestDb_" + Guid.NewGuid();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -23,6 +35,9 @@ public class TestWebApplicationFactory : WebApplicationFactory<Program>
                 ["Jwt:Audience"] = "TestAudience",
                 ["Encryption:Key"] = "TestEncryptionKey32CharsLong!!!!",
                 ["Service:ApiKey"] = "test-service-key",
+                // Dummy — der DbContext wird unten auf InMemory umgestellt; nur damit die Startup-
+                // Pflichtprüfung (Fail-fast) der ConnString erfüllt ist.
+                ["ConnectionStrings:DefaultConnection"] = "Server=localhost;Database=test;Uid=test;Pwd=test;",
             });
         });
 
