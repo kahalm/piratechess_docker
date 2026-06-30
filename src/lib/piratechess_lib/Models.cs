@@ -378,6 +378,17 @@ namespace piratechess_lib
                         ? new Move(vm.OriginalPosition, vm.NewPosition, game.WhoseTurn, promo.Value)
                         : vm;
                 }
+                // ChessDotNet 1.0.0 listet GERADE Bauern-Push-Umwandlungen (z. B. "e8=Q") nicht in
+                // GetValidMoves (Schlag-Umwandlungen schon) → der gefilterte Zug zur Zielfeld-Reihe wird
+                // nicht gefunden und der ganze (Schlüssel-)Zug bliebe ohne UCI. Für die Push-Umwandlung
+                // den Zug daher direkt konstruieren: Ursprung = dieselbe Datei, eine Reihe hinter dem Ziel.
+                if (promo.HasValue && !srcFile.HasValue && destRank is 1 or 8)
+                {
+                    int originRank = game.WhoseTurn == Player.White ? destRank - 1 : destRank + 1;
+                    var origin = new Position(destFile, originRank);
+                    if (game.GetPieceAt(origin) is Pawn)
+                        return new Move(origin, new Position(destFile, destRank), game.WhoseTurn, promo.Value);
+                }
                 return null;
             }
 
