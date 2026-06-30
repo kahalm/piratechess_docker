@@ -226,4 +226,43 @@ public class PirateChessLibTests
 
         Assert.DoesNotContain("%alt", pgn);
     }
+
+    // ---- Info-/Erklärlinien (Chessable IsInfo) → [%info]-Marker ------------
+    // Chessable markiert reine Erklär-/Infovarianten mit IsInfo=1. Diese sollen in rookhub NICHT
+    // als Quiz abgefragt werden → piratechess emittiert einen [%info]-Marker (und kein [%tqu]).
+    [Fact]
+    public void GeneratePGN_IsInfo_EmitsInfoMarkerAndNoTraining()
+    {
+        var game = new Game
+        {
+            Initial = "",
+            IsInfo = 1,
+            Color = "white",
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w", IsKey = true },
+                new JsonMove { Id = 1, Move = 1, San = "e5", Col = "b", IsKey = true },
+            ],
+        };
+
+        var pgn = game.GeneratePGN();
+
+        Assert.Contains("[%info]", pgn);
+        Assert.DoesNotContain("[%tqu", pgn);   // Info-Linie wird nie trainiert
+        Assert.Contains("e4", pgn);            // Züge bleiben (zum Durchklicken)
+    }
+
+    [Fact]
+    public void GeneratePGN_NotInfo_NoInfoMarker()
+    {
+        var game = new Game
+        {
+            Initial = "",
+            Data = [ new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w" } ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.DoesNotContain("%info", pgn);
+    }
 }

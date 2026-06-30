@@ -175,6 +175,19 @@ namespace piratechess_lib
                 }
             }
 
+            // Info-/Erklärlinie (Chessable IsInfo==1): expliziten [%info]-Marker in den Kommentar
+            // VOR dem ersten Zug setzen, damit der rookhub-Import diese Linie als „IsInfoOnly" erkennt
+            // (kein Quiz; aus Random-/Tagespuzzle-Töpfen ausgeblendet; sequenziell nur zum Durchklicken).
+            // Der rookhub-Parser scannt den Movetext nach "[%info" (analog zu [%tqu]); die [%…]-Annotation
+            // wird bei der Kommentaranzeige ohnehin herausgefiltert, verfälscht den Text also nicht.
+            if (IsInfo == 1 && sortedMoves.Count > 0)
+            {
+                var firstMove = sortedMoves.Values.First();
+                firstMove.CommentBefore = firstMove.CommentBefore == ""
+                    ? "[%info]"
+                    : "[%info]\n" + firstMove.CommentBefore;
+            }
+
             int lastMove = 0;
             // Vollzugnummer des Linienbeginns — softFail ist ab da 0-basiert indiziert.
             int firstMoveNum = sortedMoves.Count > 0 ? sortedMoves.Values.First().Move : 1;
