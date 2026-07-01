@@ -21,7 +21,18 @@ public class RawCourseCache
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RawCourseCache> _logger;
     private readonly int _maxCompressedPayloadBytes;
+    private readonly int _maxUnusableLines;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
+
+    /// <summary>
+    /// Wie viele LEERE Linien (Chessable liefert für die oid nichts — nach 10 Retries aufgegeben, i.d.R.
+    /// eine aus dem Kurs entfernte, aber noch gelistete Linie) ein sonst vollständiger Kurs haben darf und
+    /// trotzdem gecacht wird. So bleibt ein Kurs mit ein, zwei toten Linien (z. B. bid 116242) cachebar,
+    /// statt bei jedem Import komplett neu von Chessable geholt zu werden. Abgeschnittene (nicht-leere,
+    /// unparsbare) Linien und fehlende Kapitel bleiben davon UNBERÜHRT hart „unvollständig" (transienter
+    /// Proxy-Cut → soll frisch geholt werden).
+    /// </summary>
+    public const int DefaultMaxUnusableLines = 5;
 
     /// <summary>
     /// Obergrenze für einen einzelnen Cache-Eintrag (komprimierte Base64-Länge ≈ Paket-Bytes).
@@ -33,11 +44,13 @@ public class RawCourseCache
     public RawCourseCache(
         IServiceScopeFactory scopeFactory,
         ILogger<RawCourseCache> logger,
-        int maxCompressedPayloadBytes = DefaultMaxCompressedPayloadBytes)
+        int maxCompressedPayloadBytes = DefaultMaxCompressedPayloadBytes,
+        int maxUnusableLines = DefaultMaxUnusableLines)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
         _maxCompressedPayloadBytes = maxCompressedPayloadBytes;
+        _maxUnusableLines = maxUnusableLines;
     }
 
     public async Task<RestResponseCourse?> GetAsync(string bid, CancellationToken ct = default)
@@ -61,7 +74,7 @@ public class RawCourseCache
             // Import erneut crashen lassen. Beim Lesen prüfen und einen korrupten Eintrag SOFORT
             // löschen + null liefern → der laufende Import sieht einen Cache-Miss und holt die
             // Daten gleich frisch von Chessable (Linien kommen dank RawLineCache aus dem Resume-Cache).
-            if (course is not null && !IsComplete(course))
+            if (course is not null && !IsComplete(course, _maxUnusableLines))
             {
                 _logger.LogWarning(
                     "RawCourseCache: gecachter Kurs bid {Bid} ist unvollständig/korrupt (truncated Kapitel) — Eintrag wird gelöscht und sofort frisch geholt",
@@ -131,23 +144,26 @@ public class RawCourseCache
     }
 
     /// <summary>
-    /// Ein Kurs gilt als vollständig (und damit cache-würdig), wenn er mind. ein Kapitel hat
-    /// und KEIN Kapitel/keine Linie leeren bzw. <c>{}</c>-Roh-Content trägt. Ein Teil-Fetch
-    /// (z.B. Linie nach 10 erfolglosen Retries als "" abgelegt) darf NICHT gecacht werden —
-    /// sonst vergiftet er jeden Replay: leerer Content lässt die PGN-Generierung scheitern
-    /// bzw. erzeugt lückenhafte Kurse. (Genau das war der bid-116242-Dauerfehler.)
+    /// Ein Kurs gilt als vollständig (und damit cache-würdig), wenn (a) jedes Kapitel vollständig da ist
+    /// und (b) höchstens <paramref name="maxUnusableLines"/> Linien LEER sind (und die verwertbaren klar
+    /// überwiegen). Hintergrund: manche Kurse listen oids, für die Chessable dauerhaft nichts liefert
+    /// (aus dem Kurs entfernte Linien) — der Fetch gibt nach 10 Retries auf und legt "" ab. Früher machte
+    /// EINE solche tote Linie den GANZEN Kurs uncachebar (bid-116242-Dauerfehler) → er wurde bei jedem
+    /// Import komplett neu von Chessable geholt. Jetzt werden wenige tote Linien toleriert und als Lücke
+    /// mitgecacht; ABGESCHNITTENE (nicht-leere, unparsbare) Linien und fehlende/kaputte Kapitel bleiben
+    /// hart „unvollständig" (transienter Proxy-Cut → soll frisch geholt werden, nicht als Lücke zementiert).
     /// </summary>
-    public static bool IsComplete(RestResponseCourse? course)
+    public static bool IsComplete(RestResponseCourse? course, int maxUnusableLines = DefaultMaxUnusableLines)
     {
         if (course?.ChapterList is null || course.ChapterList.Count == 0)
             return false;
+        int usable = 0, unusable = 0;
         foreach (var ch in course.ChapterList)
         {
+            // Kapitel müssen IMMER vollständig da sein — ein fehlendes/abgeschnittenes Kapitel ist ein
+            // echtes Truncation-Problem (nicht bloß eine tote Einzel-Linie) und macht den Kurs uncachebar.
             if (string.IsNullOrWhiteSpace(ch.ChapterJsonContent) || ch.ChapterJsonContent == "{}")
                 return false;
-            // Truncated/korruptes Kapitel-JSON (nicht-leer, aber unvollständig — z.B. ~8 KB-Cut
-            // durch den VPN-Proxy) erkennen: muss vollständig als ResponseChapter parsen, sonst
-            // ist es ein vergifteter Teil-Fetch → nicht cachen (bzw. beim Lesen verwerfen).
             try
             {
                 if (JsonSerializer.Deserialize<ResponseChapter>(ch.ChapterJsonContent, JsonOpts) is null)
@@ -161,10 +177,15 @@ public class RawCourseCache
                 continue;
             foreach (var ln in ch.ResponseLineList)
             {
+                // Leere/{}-Linie = Chessable liefert für diese oid nichts (tote/entfernte Linie) → als
+                // Lücke zählen und bis zur Obergrenze tolerieren.
                 if (string.IsNullOrWhiteSpace(ln.LineJsonContent) || ln.LineJsonContent == "{}")
-                    return false;
-                // Symmetrisch zum Kapitel: abgeschnittene/korrupte Linien-JSON ebenfalls als
-                // unvollständig werten (nicht cachen / beim Lesen verwerfen → sofort neu holen).
+                {
+                    unusable++;
+                    continue;
+                }
+                // Nicht-leerer, aber unparsbarer Content = abgeschnitten (Proxy-Cut) → transientes
+                // Problem, NICHT tolerieren: der Kurs soll frisch geholt werden, bis die Linie ganz ankommt.
                 try
                 {
                     if (JsonSerializer.Deserialize<ResponseLine>(ln.LineJsonContent, JsonOpts) is null)
@@ -174,14 +195,17 @@ public class RawCourseCache
                 {
                     return false;
                 }
+                usable++;
             }
         }
-        return true;
+        // Wenige tote Linien tolerieren, solange die verwertbaren überwiegen (schützt kleine bzw. massiv
+        // unvollständige Kurse davor, mit lauter Lücken fälschlich als „vollständig" gecacht zu werden).
+        return unusable <= maxUnusableLines && usable > unusable;
     }
 
     public async Task SetAsync(string bid, RestResponseCourse course, CancellationToken ct = default)
     {
-        if (!IsComplete(course))
+        if (!IsComplete(course, _maxUnusableLines))
         {
             _logger.LogWarning(
                 "RawCourseCache.Set übersprungen für bid {Bid}: Kurs unvollständig (leere/truncated Kapitel oder Linien) — nicht cachen, damit kein vergifteter Cache entsteht",

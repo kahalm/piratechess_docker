@@ -30,6 +30,19 @@ public class RawCourseCacheTests
         return c;
     }
 
+    // Kurs mit <usable> verwertbaren + <dead> LEEREN (toten) Linien in einem Kapitel.
+    private static RestResponseCourse WithLines(int usable, int dead)
+    {
+        var c = new RestResponseCourse { CourseJsonContent = "{}" };
+        var ch = new RestResponseChapter { ChapterJsonContent = "{\"list\":{}}" };
+        for (int i = 0; i < usable; i++)
+            ch.ResponseLineList.Add(new RestResponseLine { Oid = i + 1, LineJsonContent = "{\"game\":{}}" });
+        for (int i = 0; i < dead; i++)
+            ch.ResponseLineList.Add(new RestResponseLine { Oid = 1000 + i, LineJsonContent = "" });
+        c.ChapterList.Add(ch);
+        return c;
+    }
+
     [Fact]
     public async Task SetThenGet_ByBid_RoundTrips()
     {
@@ -69,14 +82,31 @@ public class RawCourseCacheTests
         Assert.False(RawCourseCache.IsComplete(null));
     }
 
+    // Wenige tote (leere) Linien in einem sonst vollständigen Kurs werden toleriert → cachebar
+    // (früher machte EINE leere Linie den ganzen Kurs uncachebar; bid-116242-Fall).
+    [Fact]
+    public void IsComplete_FewDeadLines_True()
+    {
+        Assert.True(RawCourseCache.IsComplete(WithLines(usable: 10, dead: 2)));
+    }
+
+    // Über der Toleranzgrenze (Default 5) → weiterhin unvollständig.
+    [Fact]
+    public void IsComplete_TooManyDeadLines_False()
+    {
+        Assert.False(RawCourseCache.IsComplete(WithLines(usable: 10, dead: 6)));
+    }
+
+    // Auch unterhalb der Grenze: überwiegen die toten Linien, gilt der Kurs als unvollständig
+    // (schützt kleine/massiv lückenhafte Kurse vorm „vollständig"-Cachen mit lauter Löchern).
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
     [InlineData("{}")]
-    public void IsComplete_EmptyLineContent_False(string lineContent)
+    public void IsComplete_DeadLinesNotOutnumberedByUsable_False(string lineContent)
     {
-        var c = Complete("{}");
-        c.ChapterList[0].ResponseLineList.Add(new RestResponseLine { LineJsonContent = lineContent });
+        var c = Complete("{}"); // 1 verwertbare Linie
+        c.ChapterList[0].ResponseLineList.Add(new RestResponseLine { LineJsonContent = lineContent }); // 1 tote → 1 == 1
         Assert.False(RawCourseCache.IsComplete(c));
     }
 
@@ -94,12 +124,25 @@ public class RawCourseCacheTests
     public async Task Set_IncompleteCourse_NotCached()
     {
         var cache = BuildCache();
-        var poisoned = Complete("{\"course\":{}}");
-        poisoned.ChapterList[0].ResponseLineList.Add(new RestResponseLine { LineJsonContent = "" }); // leere Linie
+        var poisoned = WithLines(usable: 2, dead: 6); // 6 tote Linien > Toleranzgrenze → unvollständig
 
         await cache.SetAsync("bidX", poisoned);
 
         Assert.Null(await cache.GetAsync("bidX")); // wurde NICHT gecacht
+    }
+
+    [Fact]
+    public async Task Set_FewDeadLines_IsCachedAndRoundTrips()
+    {
+        // Kurs mit ein paar toten Linien (Chessable liefert für die oids nichts) wird jetzt gecacht,
+        // statt bei jedem Import komplett neu geholt zu werden. Die toten Linien bleiben leere Lücken.
+        var cache = BuildCache();
+
+        await cache.SetAsync("bidDead", WithLines(usable: 8, dead: 2));
+
+        var got = await cache.GetAsync("bidDead");
+        Assert.NotNull(got);
+        Assert.Equal(10, got!.ChapterList[0].ResponseLineList.Count); // 8 gefüllt + 2 leere Lücken
     }
 
     // --- Truncation-Härtung (prod): abgeschnittenes (nicht-leeres) Kapitel-JSON ---
