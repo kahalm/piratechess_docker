@@ -299,6 +299,17 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
+    public async Task CourseStart_NoBearer_NotCached_Returns400()
+    {
+        // Ohne Bearer ist ein Start nur zulässig, wenn der Kurs gecacht ist; ein nicht gecachter Kurs
+        // ohne Bearer bleibt „Bearer is required".
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
+            new { Bearer = "", Bid = "1001", Mode = "None" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task CourseStart_InvalidBearer_Returns400()
     {
         var client = ClientWithServiceKey();

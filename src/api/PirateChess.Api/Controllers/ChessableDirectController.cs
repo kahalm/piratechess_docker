@@ -281,26 +281,40 @@ public class ChessableDirectController : ControllerBase
     }
 
     [HttpPost("course/start")]
-    public IActionResult StartCourse([FromBody] DirectCourseRequest request)
+    public async Task<IActionResult> StartCourse([FromBody] DirectCourseRequest request, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(request?.Bearer))
-            return BadRequest(new { message = "Bearer is required" });
-        if (!IsValidBid(request.Bid))
+        if (!IsValidBid(request?.Bid))
             return BadRequest(new { message = "Invalid bid" });
 
-        var mode = string.IsNullOrWhiteSpace(request.Mode) ? "FirstKeyMove" : request.Mode;
+        var mode = string.IsNullOrWhiteSpace(request!.Mode) ? "FirstKeyMove" : request.Mode;
         string[] validModes = ["AllKeyMoves", "FirstKeyMove", "None"];
         if (!validModes.Contains(mode))
             return BadRequest(new { message = "Invalid mode. Use: AllKeyMoves, FirstKeyMove, None" });
 
-        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
-        if (uidError is not null)
-            return BadRequest(new { message = uidError });
+        // Bearer ist NUR für den echten Chessable-Abruf (Cache-Miss) nötig. Liegen die Rohdaten des
+        // Kurses bereits im (bid-weiten) Cache, kann RunFetchAsync sie ohne Chessable-Kontakt/uid
+        // ausliefern → dann darf der Bearer fehlen (z. B. Admin-Re-Fetch eines Repertoires, dessen
+        // Besitzer keinen Bearer (mehr) hinterlegt hat, der Kurs aber von jemand anderem gecacht wurde).
+        var bearer = request.Bearer ?? string.Empty;
+        string uid = string.Empty;
+        if (string.IsNullOrWhiteSpace(bearer))
+        {
+            if (await _rawCache.GetAsync(request.Bid, ct) is null)
+                return BadRequest(new { message = "Bearer is required" });
+            // gecacht → uid bleibt leer (im Cache-Pfad ungenutzt)
+        }
+        else
+        {
+            var (u, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+            if (uidError is not null)
+                return BadRequest(new { message = uidError });
+            uid = u;
+        }
 
         var jobId = Guid.NewGuid().ToString("N");
         _jobStore.Create(jobId);
         // Fire-and-forget: _chessableHttp + _jobStore sind Singletons → nach Controller-Dispose gültig.
-        _ = Task.Run(() => RunFetchAsync(jobId, request.Bearer, uid, request.Bid, mode));
+        _ = Task.Run(() => RunFetchAsync(jobId, bearer, uid, request.Bid, mode));
         return Ok(new DirectCourseStartResponse(jobId));
     }
 
