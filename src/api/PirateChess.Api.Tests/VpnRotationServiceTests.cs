@@ -149,6 +149,26 @@ public class VpnRotationServiceTests
     }
 
     [Fact]
+    public async Task Rotation_ReadsAndReturnsPublicIp()
+    {
+        // Nach der Rotation (und dem Proxy-Ready-Warten) wird die neue Public-IP von gluetun gelesen
+        // und zurückgegeben → _currentIp ist gesetzt, VpnIpHealth kann den Stint der IP zuordnen.
+        var handler = new StubHandler(async req =>
+        {
+            await Task.CompletedTask;
+            if (req.RequestUri!.AbsolutePath.Contains("publicip"))
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("""{"public_ip":"9.8.7.6"}""") };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+        var svc = BuildService(handler);
+
+        var ip = await svc.RotateNowAsync(CancellationToken.None);
+
+        Assert.Equal("9.8.7.6", ip);
+    }
+
+    [Fact]
     public async Task Rotation_StartHitsStalePooledConnection_RetriesWithoutForcingRecovery()
     {
         // Regression: Nach der stop→Pause→start-Sequenz schließt gluetun die

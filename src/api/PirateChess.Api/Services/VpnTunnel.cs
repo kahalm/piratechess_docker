@@ -15,7 +15,7 @@ namespace PirateChess.Api.Services;
 internal sealed class VpnTunnel
 {
     private const int DefaultRestartPauseMs = 3000;
-    private const int PublicIpPollAttempts = 5;
+    private const int PublicIpPollAttempts = 8;   // nach Proxy-Ready: gluetun braucht kurz für die IP-Ermittlung
     private const int PublicIpPollDelayMs = 1000;
     private const int ProxyReadyPollAttempts = 8;
     private const int ProxyReadyPollDelayMs = 1000;
@@ -256,10 +256,14 @@ internal sealed class VpnTunnel
             await PutVpnStatusAsync(client, statusUrl, """{"status":"running"}""", ct);
             needsRestart = false;
 
+            // ERST warten, bis der Tunnel wieder oben ist, DANN die neue Public-IP lesen. Vorher wurde
+            // /v1/publicip/ip direkt nach dem Neustart abgefragt — da hatte gluetun die neue IP noch nicht
+            // ermittelt → Rückfrage lief immer ins Leere und der Log zeigte „(unbekannt)". Folge: _currentIp
+            // blieb null → VpnIpHealth konnte den Stint keiner Exit-IP zuordnen (Per-IP-Block-Tracking tot).
+            await WaitForProxyReadyAsync(ct);
             var newIp = await PollPublicIpAsync(client, ct);
             _currentIp = newIp;   // ab jetzt zählen Requests/Blocks auf die neue IP
             _logger.LogInformation("{Label}: VPN IP rotated → {NewIp}", _label, newIp ?? "(unbekannt)");
-            await WaitForProxyReadyAsync(ct);
             return newIp;
         }
         catch (Exception ex)
