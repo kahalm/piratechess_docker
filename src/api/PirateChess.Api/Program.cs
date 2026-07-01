@@ -114,6 +114,7 @@ builder.Services.AddSingleton<EncryptionService>();
 builder.Services.AddSingleton<ExportJobQueue>();
 builder.Services.AddSingleton<CourseFetchJobStore>();
 builder.Services.AddSingleton<RawCourseCache>();
+builder.Services.AddSingleton<RawCourseReconstructor>();
 builder.Services.AddSingleton<RawLineCache>();
 
 // Un-proxied HttpClient für den gluetun-Control-Server (:8000). Diese Calls

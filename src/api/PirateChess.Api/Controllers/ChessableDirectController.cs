@@ -19,6 +19,7 @@ public class ChessableDirectController : ControllerBase
     private readonly IChessableHttpService _chessableHttp;
     private readonly CourseFetchJobStore _jobStore;
     private readonly RawCourseCache _rawCache;
+    private readonly RawCourseReconstructor _reconstructor;
     private readonly VpnIpHealth _ipHealth;
     private readonly IVpnRotationService _vpn;
     private readonly ILogger<ChessableDirectController> _logger;
@@ -27,6 +28,7 @@ public class ChessableDirectController : ControllerBase
         IChessableHttpService chessableHttp,
         CourseFetchJobStore jobStore,
         RawCourseCache rawCache,
+        RawCourseReconstructor reconstructor,
         VpnIpHealth ipHealth,
         IVpnRotationService vpn,
         ILogger<ChessableDirectController> logger)
@@ -34,6 +36,7 @@ public class ChessableDirectController : ControllerBase
         _chessableHttp = chessableHttp;
         _jobStore = jobStore;
         _rawCache = rawCache;
+        _reconstructor = reconstructor;
         _ipHealth = ipHealth;
         _vpn = vpn;
         _logger = logger;
@@ -201,6 +204,20 @@ public class ChessableDirectController : ControllerBase
     [HttpGet("courses/cached")]
     public async Task<IActionResult> CachedBids(CancellationToken ct)
         => Ok(new { bids = (await _rawCache.GetAllCachedBidsAsync(ct)).ToList() });
+
+    /// <summary>Wartung: baut den servable Cache eines Kurses aus BEREITS GESPEICHERTEN Rohdaten
+    /// wieder auf (Audit-Log + permanenter Linien-Cache) — ohne Chessable-Abruf. Für Kurse, deren
+    /// aktueller Bearer sie nicht besitzt (BOOK_NOT_OWNED), deren Rohantworten aber noch vorliegen.</summary>
+    [HttpPost("course/reconstruct")]
+    public async Task<IActionResult> Reconstruct([FromBody] DirectCourseReconstructRequest request, CancellationToken ct)
+    {
+        if (!IsValidBid(request?.Bid))
+            return BadRequest(new { message = "Invalid bid" });
+        var r = await _reconstructor.ReconstructAsync(request!.Bid, ct);
+        return r.Ok
+            ? Ok(new { ok = true, chapters = r.Chapters, lines = r.Lines, missingLines = r.MissingLines })
+            : BadRequest(new { message = r.Error, chapters = r.Chapters, lines = r.Lines, missingLines = r.MissingLines });
+    }
 
     /// <summary>Leichte Vorab-Schätzung der Gesamt-Linienzahl eines Kurses (für die Admin-Kursliste).
     /// Gecacht → aus dem Rohdaten-Cache (kein Chessable-Call); sonst EIN getCourse?includeVariations.</summary>

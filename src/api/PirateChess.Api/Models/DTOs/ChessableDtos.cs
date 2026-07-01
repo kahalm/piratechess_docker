@@ -19,6 +19,8 @@ public record DirectTestResponse(string Uid, int CourseCount, int? TunnelIndex =
 //   "FirstKeyMove" → erster Key-Zug je Linie trainierbar ([%tqu ...])  → rookhub-Buch (default)
 //   "AllKeyMoves"  → alle Key-Züge trainierbar
 public record DirectCourseRequest(string Bearer, string Bid, string? Mode);
+/// <summary>Wartung: Cache eines bids aus gespeicherten Rohdaten rekonstruieren (kein Bearer nötig).</summary>
+public record DirectCourseReconstructRequest(string Bid);
 public record DirectCourseResponse(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
 
 // Async-Variante mit Fortschritt: /course/start liefert eine JobId, /course/{jobId} pollt
