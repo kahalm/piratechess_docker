@@ -236,7 +236,13 @@ public class ExportBackgroundService : BackgroundService
             NotifyProgress(userGroup, msg);
         });
 
+        lib.SetErrorDiagEvent(detail =>
+            _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel (ExportId {ExportId}, bid {Bid}): {Detail}", job.ExportId, job.ChessableBid, detail));
+
         var (pgn, courseName) = await Task.Run(() => lib.GetCourse(job.ChessableBid, useLocalData: true), ct);
+
+        if (lib.ErrorCount > 0)
+            _logger.LogWarning("Export {ExportId} bid {Bid} mit {Errors} übersprungenen Linien/Kapiteln", job.ExportId, job.ChessableBid, lib.ErrorCount);
 
         if (string.IsNullOrEmpty(pgn))
         {

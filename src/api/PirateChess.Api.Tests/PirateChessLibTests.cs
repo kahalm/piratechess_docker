@@ -76,6 +76,44 @@ public class PirateChessLibTests
         Assert.Equal(1, lib.ErrorCount); // korrupte Linie übersprungen statt Crash
     }
 
+    // Tracing: eine übersprungene Linie darf nicht mehr spurlos verschwinden — Kontext + voller
+    // Stacktrace müssen in ErrorDetails landen UND den Diag-Event feuern, damit der Aufrufer sie
+    // nach Elasticsearch loggt.
+    [Fact]
+    public void GetCourse_SkippedLine_CapturesDiagnosticDetail()
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"}]}}",
+            "{\"game\":{\"initial\":\"\",\"moves\":[{\"san\":\"e4\""); // korrupt
+        var lib = new PirateChessLib { restResponseCourse = course };
+        var events = new List<string>();
+        lib.SetErrorDiagEvent(events.Add);
+
+        lib.GetCourse("1", useLocalData: true);
+
+        Assert.Equal(1, lib.ErrorCount);
+        Assert.Single(lib.ErrorDetails);
+        Assert.Single(events);
+        Assert.Contains("Linien-JSON übersprungen", lib.ErrorDetails[0]);
+        Assert.Contains("JsonException", lib.ErrorDetails[0]); // Exceptiontyp + Stacktrace mitgeschrieben
+        Assert.Contains("at ", lib.ErrorDetails[0]);           // Stacktrace-Zeile vorhanden
+    }
+
+    // ErrorDetails werden bei jedem GetCourse-Lauf zurückgesetzt (kein Leck über Läufe hinweg).
+    [Fact]
+    public void GetCourse_CleanCourse_NoDiagnosticDetail()
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"}]}}",
+            "{\"game\":{\"initial\":\"\",\"moves\":[{\"id\":0,\"move\":1,\"san\":\"e4\"}]}}");
+        var lib = new PirateChessLib { restResponseCourse = course };
+
+        lib.GetCourse("1", useLocalData: true);
+
+        Assert.Equal(0, lib.ErrorCount);
+        Assert.Empty(lib.ErrorDetails);
+    }
+
     // Regression (prod, bid 282212): Chessable lieferte in "draws" einen null-Eintrag; die
     // .Where(x => x.Object == ...)-Lambda dereferenzierte ihn → NullReferenceException in
     // GeneratePGN ließ den ganzen Kurs-Abruf scheitern.

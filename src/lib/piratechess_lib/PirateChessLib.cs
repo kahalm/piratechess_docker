@@ -13,12 +13,20 @@ namespace piratechess_lib
         private Action<string>? _lineCounterEvent;
         private Action<string>? _cumulativeLinesEvent;
         private Action<string>? _retryEvent;
+        private Action<string>? _errorDiagEvent;
+        private readonly List<string> _errorDetails = new();
+        private const int MaxErrorDetails = 100;
         private readonly StringBuilder _pgn = new();
         private string _bearer = string.Empty;
         private string _uid = string.Empty;
 
         public RestResponseCourse? restResponseCourse { get; set; }
         public int ErrorCount => _errorCount;
+        /// <summary>Details (inkl. voller Stacktraces) der beim Parsen übersprungenen Linien/Kapitel.
+        /// Der Aufrufer loggt sie strukturiert nach ES, da diese Exceptions in der Lib bewusst
+        /// geschluckt werden (eine kaputte Linie darf nicht den ganzen Kurs abreißen) und sonst
+        /// spurlos verschwinden würden.</summary>
+        public IReadOnlyList<string> ErrorDetails => _errorDetails;
         public bool AllKeyMovesTraining { get; set; } = false;
         public bool NoTrainingMove { get; set; } = false;
         public bool AddMoveToEmptyChapters { get; set; } = false;
@@ -39,6 +47,7 @@ namespace piratechess_lib
         {
             _cumLines = 0;
             _errorCount = 0;
+            _errorDetails.Clear();
             string? content = null;
             string coursename = string.Empty;
 
@@ -150,13 +159,14 @@ namespace piratechess_lib
                 {
                     responseChapter = JsonSerializer.Deserialize<ResponseChapter>(content, options: caseInvariant) ?? new ResponseChapter();
                 }
-                catch (JsonException)
+                catch (JsonException ex)
                 {
                     // Abgeschnittene/korrupte Kapitel-JSON (z.B. mitten im Stream abgebrochener
                     // Fetch bzw. ~8 KB-Truncation durch den VPN-Proxy) überspringen statt den
                     // ganzen Kurs-Export crashen zu lassen — der nicht-leere, aber unvollständige
                     // Body rutscht sonst an der Leer-Prüfung oben vorbei.
                     _errorCount++;
+                    RecordError("Kapitel-JSON übersprungen (korrupt/abgeschnitten)", ex, content);
                     return coursename;
                 }
                 coursename = responseChapter.List.Name;
@@ -257,11 +267,12 @@ namespace piratechess_lib
                 {
                     game = JsonSerializer.Deserialize<ResponseLine>(content, options: caseInvariant);
                 }
-                catch (JsonException)
+                catch (JsonException ex)
                 {
                     // Abgeschnittene/korrupte Linien-JSON überspringen statt crashen — wie beim
                     // Kapitel oben killt sonst eine einzige unvollständige Linie den ganzen Kurs.
                     _errorCount++;
+                    RecordError("Linien-JSON übersprungen (korrupt/abgeschnitten)", ex, content);
                     return;
                 }
                 string? pgn;
@@ -269,12 +280,14 @@ namespace piratechess_lib
                 {
                     pgn = game?.Game?.GeneratePGN(AllKeyMovesTraining, NoTrainingMove);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
                     // Korrupte Zug-/Varianten-Daten (z. B. IndexOutOfRange in der SAN→UCI-Konvertierung
                     // bzw. GetVariationPgn) dürfen nicht den ganzen Kurs-Export abreißen — wie bei leerer/
-                    // kaputter Linien-JSON oben nur diese eine Linie überspringen.
+                    // kaputter Linien-JSON oben nur diese eine Linie überspringen. Voller Stacktrace geht
+                    // via RecordError an den Aufrufer → ES (sonst spurlos, da hier geschluckt).
                     _errorCount++;
+                    RecordError("GeneratePGN übersprungen (korrupte Zug-/Variantendaten)", ex, content);
                     return;
                 }
 
@@ -488,6 +501,34 @@ namespace piratechess_lib
         public void SetRetryEvent(Action<string> retryEvent)
         {
             _retryEvent = retryEvent;
+        }
+
+        /// <summary>Diagnose-Callback für übersprungene Linien/Kapitel — feuert je geschluckter
+        /// Parser-Exception mit Kontext + vollem Stacktrace, damit der Aufrufer sie nach ES loggen kann.</summary>
+        public void SetErrorDiagEvent(Action<string> errorDiagEvent)
+        {
+            _errorDiagEvent = errorDiagEvent;
+        }
+
+        private void RecordError(string context, Exception? ex = null, string? snippet = null)
+        {
+            var sb = new StringBuilder(context);
+            if (!string.IsNullOrEmpty(snippet))
+            {
+                var trimmed = snippet.Length > 300 ? snippet.Substring(0, 300) + "…" : snippet;
+                sb.Append(" | snippet: ").Append(trimmed.Replace('\n', ' ').Replace('\r', ' '));
+            }
+            if (ex != null)
+            {
+                sb.Append(" | ").Append(ex.GetType().Name).Append(": ").Append(ex.Message);
+                sb.Append('\n').Append(ex.StackTrace);
+            }
+            var detail = sb.ToString();
+            if (_errorDetails.Count < MaxErrorDetails)
+            {
+                _errorDetails.Add(detail);
+            }
+            _errorDiagEvent?.Invoke(detail);
         }
 
         public string ExtractUid(string jwt)

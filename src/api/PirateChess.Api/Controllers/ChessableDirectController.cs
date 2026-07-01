@@ -181,6 +181,9 @@ public class ChessableDirectController : ControllerBase
             case "None": lib.AllKeyMovesTraining = false; lib.NoTrainingMove = true; break;
         }
 
+        lib.SetErrorDiagEvent(detail =>
+            _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel (bid {Bid}, uid {Uid}): {Detail}", request.Bid, uid, detail));
+
         string pgn, courseName;
         try
         {
@@ -190,6 +193,10 @@ public class ChessableDirectController : ControllerBase
         {
             _logger.LogWarning(ex, "PGN generation failed for bid {Bid} (uid {Uid})", request.Bid, uid);
             return BadRequest(new { message = $"PGN generation failed: {ex.Message}" });
+        }
+        if (lib.ErrorCount > 0)
+        {
+            _logger.LogWarning("Kurs bid {Bid} (uid {Uid}) mit {Errors} übersprungenen Linien/Kapiteln exportiert (Details siehe vorige Warnungen)", request.Bid, uid, lib.ErrorCount);
         }
 
         var chapterCount = data?.ChapterList.Count ?? 0;
@@ -385,7 +392,11 @@ public class ChessableDirectController : ControllerBase
                 case "None": lib.AllKeyMovesTraining = false; lib.NoTrainingMove = true; break;
             }
 
+            lib.SetErrorDiagEvent(detail =>
+                _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel (job {JobId}, bid {Bid}): {Detail}", jobId, bid, detail));
             var (pgn, courseName) = await Task.Run(() => lib.GetCourse(bid, useLocalData: true));
+            if (lib.ErrorCount > 0)
+                _logger.LogWarning("Kurs-Fetch-Job {JobId} bid {Bid} mit {Errors} übersprungenen Linien/Kapiteln abgeschlossen", jobId, bid, lib.ErrorCount);
             var lnCount = data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0;
             if (lnCount > job.LinesTotal) job.LinesTotal = lnCount; // tatsächliche Zahl ist autoritativ
             job.Complete(pgn, courseName, data?.ChapterList.Count ?? 0, lnCount);
