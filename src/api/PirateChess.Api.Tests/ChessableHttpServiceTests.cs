@@ -86,6 +86,17 @@ public class ChessableHttpServiceTests
         Assert.StartsWith("Chessable:", msg);
     }
 
+    [Fact]
+    public void TryGetChessableErrorMessage_BookNotOwned_UsesUserFriendlyMessage()
+    {
+        // Beobachteter getCourse-Body für nicht besessene Kurse: message ist LEER, die echte
+        // Meldung steht in userFriendlyErrorMessage. Früher rutschte das als „Course has no chapters" durch.
+        const string body = "{\"error\":{\"userFriendlyErrorMessage\":\"You do not own this course.\",\"message\":\"\",\"code\":\"BOOK_NOT_OWNED\"},\"hash\":\"124\"}";
+        var msg = ChessableHttpService.TryGetChessableErrorMessage(body);
+        Assert.NotNull(msg);
+        Assert.Contains("You do not own this course", msg);
+    }
+
     [Theory]
     [InlineData("{\"homeData\":{\"booksList\":[]}}")] // gültige (leere) Kursliste → kein Fehler
     [InlineData("{}")]

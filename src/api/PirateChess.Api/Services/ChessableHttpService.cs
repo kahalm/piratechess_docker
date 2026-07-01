@@ -361,7 +361,11 @@ public class ChessableHttpService : IChessableHttpService
             var message = err.ValueKind switch
             {
                 JsonValueKind.String => err.GetString(),
-                JsonValueKind.Object when err.TryGetProperty("message", out var m) => m.GetString(),
+                // `error.message` bevorzugen; ist sie leer (z. B. BOOK_NOT_OWNED liefert message:"" und
+                // die eigentliche Meldung in userFriendlyErrorMessage), auf userFriendlyErrorMessage
+                // zurückfallen. Sonst würde ein „You do not own this course" fälschlich als „Course has
+                // no chapters" durchrutschen.
+                JsonValueKind.Object => StringProp(err, "message") is { Length: > 0 } m ? m : StringProp(err, "userFriendlyErrorMessage"),
                 _ => null,
             };
             if (string.IsNullOrWhiteSpace(message)) return null;
@@ -375,6 +379,10 @@ public class ChessableHttpService : IChessableHttpService
             return null;
         }
     }
+
+    /// <summary>Liefert eine String-Property eines JSON-Objekts oder null (nicht vorhanden/kein String).</summary>
+    private static string? StringProp(JsonElement obj, string name)
+        => obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
     public async Task<(RestResponseCourse? data, string? error)> FetchCourseDataAsync(
         string bearer, string uid, string bid,
