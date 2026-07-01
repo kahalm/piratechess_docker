@@ -57,6 +57,17 @@ public class ChessableDirectController : ControllerBase
     [HttpGet("vpn/tunnels")]
     public IActionResult Tunnels() => Ok(_vpn.DescribeTunnels());
 
+    /// <summary>Commit-SHA + Ref des laufenden Images (vom CI als Build-Arg gesetzt, siehe Dockerfile
+    /// <c>ARG GIT_SHA</c>/<c>GIT_REF</c> → ENV <c>BUILD_GIT_SHA</c>/<c>BUILD_GIT_REF</c>). RookHubs
+    /// Admin-CI-Seite ruft das ab, um den GitHub-Actions-Run des laufenden piratechess-Images zu markieren
+    /// (Branch bei :dev, Tag bei :prod). Leere Strings, wenn nicht gesetzt.</summary>
+    [HttpGet("build-info")]
+    public IActionResult BuildInfo() => Ok(new
+    {
+        sha = Environment.GetEnvironmentVariable("BUILD_GIT_SHA") ?? "",
+        @ref = Environment.GetEnvironmentVariable("BUILD_GIT_REF") ?? "",
+    });
+
     /// <summary>Bearer-Test (getHomeData). Mit <c>TunnelIndex</c> (0-basiert) läuft der Test fix über
     /// GENAU diesen VPN-Tunnel — für „funktioniert Chessable über genau diesen VPN / mit welcher Exit-IP".
     /// Ohne <c>TunnelIndex</c> wie bisher über das round-robin.</summary>

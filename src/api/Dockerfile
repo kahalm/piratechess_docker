@@ -37,6 +37,13 @@ RUN tar -xzf /tmp/curl-imp.tar.gz -C /usr/local/bin/ \
 
 COPY --from=build /app/publish .
 
+# Build-Herkunft (vom CI als --build-arg gesetzt) → als ENV, von GET /api/chessable/direct/build-info
+# ausgeliefert, damit RookHubs Admin-CI-Seite den laufenden piratechess-Build-Run markieren kann.
+ARG GIT_SHA=
+ARG GIT_REF=
+ENV BUILD_GIT_SHA=$GIT_SHA
+ENV BUILD_GIT_REF=$GIT_REF
+
 # Install EF Core tools for migrations
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080

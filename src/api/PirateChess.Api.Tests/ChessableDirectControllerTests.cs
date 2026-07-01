@@ -33,6 +33,35 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
+    public async Task BuildInfo_ReflectsEnvironmentVariables()
+    {
+        Environment.SetEnvironmentVariable("BUILD_GIT_SHA", "deadbeef");
+        Environment.SetEnvironmentVariable("BUILD_GIT_REF", "v1.0.30");
+        try
+        {
+            var client = ClientWithServiceKey();
+            var response = await client.GetAsync("/api/chessable/direct/build-info");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>(JsonOpts);
+            Assert.Equal("deadbeef", body.GetProperty("sha").GetString());
+            Assert.Equal("v1.0.30", body.GetProperty("ref").GetString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("BUILD_GIT_SHA", null);
+            Environment.SetEnvironmentVariable("BUILD_GIT_REF", null);
+        }
+    }
+
+    [Fact]
+    public async Task BuildInfo_MissingServiceKey_Returns401()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/chessable/direct/build-info");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Test_WrongServiceKey_Returns401()
     {
         var client = ClientWithServiceKey("nope");
