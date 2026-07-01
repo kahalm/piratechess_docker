@@ -226,8 +226,8 @@ public class ChessableDirectController : ControllerBase
             return BadRequest(new { message = "Invalid bid" });
         var r = await _reconstructor.ReconstructAsync(request!.Bid, ct);
         return r.Ok
-            ? Ok(new { ok = true, chapters = r.Chapters, lines = r.Lines, missingLines = r.MissingLines })
-            : BadRequest(new { message = r.Error, chapters = r.Chapters, lines = r.Lines, missingLines = r.MissingLines });
+            ? Ok(new { ok = true, chapters = r.Chapters, lines = r.Lines, missingLines = r.MissingLines, unparseableLines = r.UnparseableLines })
+            : BadRequest(new { message = r.Error, chapters = r.Chapters, lines = r.Lines, missingLines = r.MissingLines, unparseableLines = r.UnparseableLines });
     }
 
     /// <summary>Leichte Vorab-Schätzung der Gesamt-Linienzahl eines Kurses (für die Admin-Kursliste).

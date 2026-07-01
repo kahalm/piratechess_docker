@@ -73,6 +73,47 @@ public class RawCourseReconstructorTests
     }
 
     [Fact]
+    public async Task Reconstruct_ToleratesTruncatedLine_StillBuildsCache_AndReports()
+    {
+        var (rec, cache, sf) = Build();
+
+        // getCourse (1 Kapitel), getList mit 3 Linien; oid=100/101 sauber, oid=102 abgeschnitten
+        // (nicht leer, aber unparsbar). Frisches Nachladen ist bei unowned Kursen unmöglich → als Lücke
+        // tolerieren (usable 2 > dead 1, innerhalb Toleranz) statt die Rekonstruktion zu kippen.
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.ChessableRawResponses.Add(new ChessableRawResponse
+            {
+                Endpoint = "course",
+                Url = "https://www.chessable.com/api/v1/getCourse?uid=1&bid=778&includeVariations=true",
+                RawJson = GzipText.Compress("{\"course\":{\"data\":[{\"id\":1,\"total\":3}]}}"),
+                RequestedAt = DateTime.UtcNow
+            });
+            db.ChessableRawResponses.Add(new ChessableRawResponse
+            {
+                Endpoint = "chapter",
+                Url = "https://www.chessable.com/api/v1/getList?uid=1&bid=778&lid=1",
+                RawJson = GzipText.Compress("{\"list\":{\"data\":[{\"id\":100},{\"id\":101},{\"id\":102}]}}"),
+                RequestedAt = DateTime.UtcNow
+            });
+            db.CachedRawLines.Add(new CachedRawLine { Oid = 100, LineJsonContent = GzipText.Compress("{\"game\":{}}"), CachedAt = DateTime.UtcNow });
+            db.CachedRawLines.Add(new CachedRawLine { Oid = 101, LineJsonContent = GzipText.Compress("{\"game\":{}}"), CachedAt = DateTime.UtcNow });
+            // Abgeschnitten: nicht leer, aber kein gültiges JSON → unparsbar.
+            db.CachedRawLines.Add(new CachedRawLine { Oid = 102, LineJsonContent = GzipText.Compress("{\"game\":{"), CachedAt = DateTime.UtcNow });
+            await db.SaveChangesAsync();
+        }
+
+        var r = await rec.ReconstructAsync("778");
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(3, r.Lines);
+        Assert.Equal(0, r.MissingLines);
+        Assert.Equal(1, r.UnparseableLines);
+        Assert.NotNull(await cache.GetAsync("778"));
+    }
+
+    [Fact]
     public async Task Reconstruct_NoStoredCourse_Fails()
     {
         var (rec, _, _) = Build();

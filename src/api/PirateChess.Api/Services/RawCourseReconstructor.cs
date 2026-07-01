@@ -32,7 +32,7 @@ public class RawCourseReconstructor
         _logger = logger;
     }
 
-    public record Result(bool Ok, string? Error, int Chapters, int Lines, int MissingLines);
+    public record Result(bool Ok, string? Error, int Chapters, int Lines, int MissingLines, int UnparseableLines = 0);
 
     public async Task<Result> ReconstructAsync(string bid, CancellationToken ct = default)
     {
@@ -60,7 +60,8 @@ public class RawCourseReconstructor
             return new Result(false, "Keine verwertbare getCourse-Antwort im Audit-Log (evtl. Retention abgelaufen oder nie besessen).", 0, 0, 0);
 
         var rest = new RestResponseCourse { CourseJsonContent = courseJson };
-        int totalLines = 0, missing = 0;
+        int totalLines = 0, missing = 0, unparseable = 0;
+        var deadOids = new List<int>();   // Oids ohne verwertbaren Inhalt → als Lücke behandeln
 
         foreach (var chapter in course.Course.Data)
         {
@@ -86,23 +87,54 @@ public class RawCourseReconstructor
             {
                 totalLines++;
                 var content = await GetLineContentAsync(db, oid, ct);
-                if (string.IsNullOrEmpty(content)) missing++;
+                if (string.IsNullOrEmpty(content))
+                {
+                    missing++;
+                    content = "";           // tote/entfernte Linie → als Lücke (IsComplete toleriert bis maxUnusableLines)
+                    deadOids.Add(oid);
+                }
+                else if (SafeParse<ResponseLine>(content) is null)
+                {
+                    // Nicht-leerer, aber unparsbarer Inhalt (Proxy-Cut/abgeschnitten). Im NORMALEN Betrieb
+                    // lehnt IsComplete das hart ab (Kurs neu holen). Bei der Einmal-Rekonstruktion ist ein
+                    // frisches Holen nicht möglich (Kurs nicht besessen) → wie eine tote Linie behandeln
+                    // (leeren → als tolerierbare Lücke) und separat zählen, statt die ganze Rekonstruktion zu kippen.
+                    unparseable++;
+                    content = "";
+                    deadOids.Add(oid);
+                }
                 restChapter.ResponseLineList.Add(new RestResponseLine { Oid = oid, LineJsonContent = content });
             }
             rest.ChapterList.Add(restChapter);
         }
 
-        // 3) In den servable Cache legen — SetAsync prüft Vollständigkeit selbst (zu viele Lücken →
-        //    kein Schreiben). Vorab dieselbe Prüfung, um eine sprechende Meldung zu liefern.
+        // 3) Tote/abgeschnittene Linien im permanenten Linien-Cache neutralisieren: der Lesepfad
+        //    (RawCourseCache.GetAsync → ReconstructLinesAsync) füllt leere Linien aus CachedRawLines nach
+        //    und IsComplete lehnt einen nicht-leeren, unparsbaren Inhalt HART ab. Bliebe die abgeschnittene
+        //    Zeile stehen, würde der frisch geschriebene Cache beim ersten Lesen sofort wieder verworfen.
+        //    Also die betroffenen Oid-Zeilen entfernen → beim Lesen echte (tolerierbare) Lücke statt Gift.
+        if (deadOids.Count > 0)
+        {
+            foreach (var chunk in deadOids.Distinct().Chunk(500))
+            {
+                var rows = await db.CachedRawLines.Where(c => chunk.Contains(c.Oid)).ToListAsync(ct);
+                if (rows.Count > 0) db.CachedRawLines.RemoveRange(rows);
+            }
+            await db.SaveChangesAsync(ct);
+        }
+
+        // 4) In den servable Cache legen. Toleranz = dieselbe wie im Lesepfad (RawCourseCache._maxUnusableLines),
+        //    damit ein geschriebener Cache beim Lesen nicht sofort als „zu viele Lücken" verworfen wird.
+        int dead = missing + unparseable;
         if (!RawCourseCache.IsComplete(rest))
             return new Result(false,
-                $"Rekonstruktion unvollständig — {missing}/{totalLines} Linien fehlen oder sind unparsbar; Cache NICHT geschrieben.",
-                course.Course.Data.Count, totalLines, missing);
+                $"Rekonstruktion unvollständig — {dead}/{totalLines} Linien unbrauchbar ({missing} leer, {unparseable} abgeschnitten), mehr als toleriert; Cache NICHT geschrieben.",
+                course.Course.Data.Count, totalLines, missing, unparseable);
 
         await _cache.SetAsync(bid, rest, ct);
-        _logger.LogInformation("RawCourse aus Rohdaten rekonstruiert: bid {Bid}, {Chapters} Kapitel, {Lines} Linien ({Missing} fehlend)",
-            bid, course.Course.Data.Count, totalLines, missing);
-        return new Result(true, null, course.Course.Data.Count, totalLines, missing);
+        _logger.LogInformation("RawCourse aus Rohdaten rekonstruiert: bid {Bid}, {Chapters} Kapitel, {Lines} Linien ({Missing} leer, {Unparseable} abgeschnitten)",
+            bid, course.Course.Data.Count, totalLines, missing, unparseable);
+        return new Result(true, null, course.Course.Data.Count, totalLines, missing, unparseable);
     }
 
     /// <summary>Linien-Inhalt zuerst aus dem permanenten Linien-Cache, sonst aus dem <c>line</c>-Audit.</summary>
