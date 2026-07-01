@@ -395,7 +395,12 @@ namespace piratechess_lib
                 // GetValidMoves (Schlag-Umwandlungen schon) → der gefilterte Zug zur Zielfeld-Reihe wird
                 // nicht gefunden und der ganze (Schlüssel-)Zug bliebe ohne UCI. Für die Push-Umwandlung
                 // den Zug daher direkt konstruieren: Ursprung = dieselbe Datei, eine Reihe hinter dem Ziel.
-                if (promo.HasValue && !srcFile.HasValue && destRank is 1 or 8)
+                // WICHTIG: die Umwandlungsreihe muss zur ziehenden Seite passen (Weiß→8, Schwarz→1). Eine
+                // farbblinde Prüfung (destRank is 1 or 8) errechnete bei Weiß+Reihe 1 / Schwarz+Reihe 8
+                // eine originRank von 0 bzw. 9 → new Position(...,0/9) → GetPieceAt wirft
+                // IndexOutOfRangeException und riss den ganzen Kurs-Abruf ab (kaputte Varianten-Daten).
+                bool promRank = game.WhoseTurn == Player.White ? destRank == 8 : destRank == 1;
+                if (promo.HasValue && !srcFile.HasValue && promRank)
                 {
                     int originRank = game.WhoseTurn == Player.White ? destRank - 1 : destRank + 1;
                     var origin = new Position(destFile, originRank);

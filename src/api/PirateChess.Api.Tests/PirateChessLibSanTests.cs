@@ -50,6 +50,44 @@ public class PirateChessLibSanTests
         Assert.Equal(expectedUci, FirstKeyUci(fen, san));
     }
 
+    // --- Regression: farbwidrige Push-Umwandlung in einer Variante riss den Kurs-Abruf ab ---
+
+    /// <summary>Baut einen Zug, dessen "after" eine Variante (V) mit einem einzelnen SAN-Zug ab
+    /// <paramref name="branchFen"/> enthält, und rendert das PGN über den echten GeneratePGN-Pfad.</summary>
+    private static string VariationPgn(string branchFen, string variationSan)
+    {
+        // GetVariationPgn (Varianten-Pfad) ruft SanToMove OHNE try/catch auf — im Gegensatz zum
+        // Haupt-Zug-Pfad (GetFirstKeyMoveUci), der Exceptions schluckt. Eine farbwidrige Umwandlung
+        // muss also hier reproduziert werden.
+        string after = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            before = branchFen,
+            after = "",
+            data = new object[] { new { key = "V", val = new object[] { new { key = "S", val = variationSan } } } },
+        });
+        var game = new Game
+        {
+            Initial = branchFen,
+            Data = [ new JsonMove { Id = 0, Move = 1, Col = "w", San = "Ke2", After = after } ],
+        };
+        return game.GeneratePGN(noTrainingMove: true);
+    }
+
+    [Theory]
+    // branchFen mit Weiß am Zug, Variante wandelt auf Reihe 1 um (nur Schwarz wandelt dort) → originRank 0
+    [InlineData("4k3/8/8/8/8/8/8/4K3 w - - 0 1", "1. e1=Q")]
+    // branchFen mit Schwarz am Zug, Variante wandelt auf Reihe 8 um (nur Weiß wandelt dort) → originRank 9
+    [InlineData("4k3/8/8/8/8/8/8/4K3 b - - 0 1", "1... e8=Q")]
+    public void GeneratePgn_VariationWithColorMismatchedPromotion_DoesNotThrow(string branchFen, string variationSan)
+    {
+        // Vor dem Fix errechnete die farbblinde Bedingung (destRank is 1 or 8) eine originRank von 0 bzw. 9
+        // → new Position(destFile, 0/9) → ChessGame.GetPieceAt warf IndexOutOfRangeException, die durch
+        // GetVariationPgn/GeneratePGN bis in den Kurs-Abruf durchschlug (ganzer Kurs „failed").
+        // Jetzt wird die (illegale) Umwandlung sauber verworfen und die Variante als {Kommentar} gerendert.
+        var ex = Record.Exception(() => VariationPgn(branchFen, variationSan));
+        Assert.Null(ex);
+    }
+
     // --- softFail-Indizierung (geduldete Alternativzüge, [%alt …]) ---
 
     [Fact]
