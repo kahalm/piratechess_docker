@@ -100,6 +100,25 @@ public class PirateChessLibTests
         Assert.Contains("%cal", pgn);   // der gültige Pfeil bleibt erhalten
     }
 
+    // Regression: korrupte Chessable-Daten mit doppelter Move-Id ließen SortedList.Add eine
+    // ArgumentException werfen ("Index/Key"-Fehler) → ganzer Kurs-Abruf „failed". Der Indexer
+    // überschreibt jetzt tolerant statt zu werfen.
+    [Fact]
+    public void GeneratePGN_DuplicateMoveIds_DoesNotThrow()
+    {
+        var game = new Game
+        {
+            Data =
+            [
+                new JsonMove { Id = 1, Move = 1, San = "e4" },
+                new JsonMove { Id = 1, Move = 1, San = "d4" },   // dieselbe Id → früher Crash
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+        Assert.False(string.IsNullOrWhiteSpace(pgn));
+    }
+
     [Fact]
     public void GeneratePGN_NullDrawsList_IgnoredNotThrow()
     {

@@ -81,7 +81,9 @@ namespace piratechess_lib
             Data ??= [];
             foreach (JsonMove move in Data)
             {
-                sortedMoves.Add(move.Id, move);
+                // Indexer statt Add: doppelte Move-Ids (korrupte Chessable-Daten) überschreiben statt
+                // eine ArgumentException zu werfen, die den ganzen Kurs-Export abriss.
+                sortedMoves[move.Id] = move;
 
                 if (move.After is not null and not "")
                 {

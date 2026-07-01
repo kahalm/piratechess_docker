@@ -264,7 +264,19 @@ namespace piratechess_lib
                     _errorCount++;
                     return;
                 }
-                string? pgn = game?.Game?.GeneratePGN(AllKeyMovesTraining, NoTrainingMove);
+                string? pgn;
+                try
+                {
+                    pgn = game?.Game?.GeneratePGN(AllKeyMovesTraining, NoTrainingMove);
+                }
+                catch (Exception)
+                {
+                    // Korrupte Zug-/Varianten-Daten (z. B. IndexOutOfRange in der SAN→UCI-Konvertierung
+                    // bzw. GetVariationPgn) dürfen nicht den ganzen Kurs-Export abreißen — wie bei leerer/
+                    // kaputter Linien-JSON oben nur diese eine Linie überspringen.
+                    _errorCount++;
+                    return;
+                }
 
                 pgnHeader.FEN = game?.Game?.Initial ?? "";
 
