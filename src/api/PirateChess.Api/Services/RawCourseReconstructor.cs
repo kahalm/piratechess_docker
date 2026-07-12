@@ -118,15 +118,25 @@ public class RawCourseReconstructor
             foreach (var chunk in deadOids.Distinct().Chunk(500))
             {
                 var rows = await db.CachedRawLines.Where(c => chunk.Contains(c.Oid)).ToListAsync(ct);
+                foreach (var row in rows)
+                {
+                    // Der Delete ist irreversibel (bei unowned Kursen kein Re-Fetch, line-Audit hat
+                    // Retention) → die Bytes vor dem Entfernen als Forensik-Snippet nach ES loggen.
+                    var snippet = SafeDecompress(row.LineJsonContent ?? "") ?? "<nicht dekomprimierbar>";
+                    _logger.LogWarning(
+                        "Reconstruct bid {Bid}: lösche unbrauchbare CachedRawLine oid {Oid} ({Length} Zeichen), Snippet: {Snippet}",
+                        bid, row.Oid, snippet.Length, snippet.Length > 300 ? snippet[..300] + "…" : snippet);
+                }
                 if (rows.Count > 0) db.CachedRawLines.RemoveRange(rows);
             }
             await db.SaveChangesAsync(ct);
         }
 
-        // 4) In den servable Cache legen. Toleranz = dieselbe wie im Lesepfad (RawCourseCache._maxUnusableLines),
-        //    damit ein geschriebener Cache beim Lesen nicht sofort als „zu viele Lücken" verworfen wird.
+        // 4) In den servable Cache legen. Toleranz = DIESELBE Instanz-Toleranz wie im Lese-/Schreibpfad
+        //    (RawCourseCache.MaxUnusableLines), damit ein hier als vollständig eingestufter Kurs nicht
+        //    von SetAsync verweigert bzw. beim ersten Lesen als „zu viele Lücken" verworfen wird.
         int dead = missing + unparseable;
-        if (!RawCourseCache.IsComplete(rest))
+        if (!RawCourseCache.IsComplete(rest, _cache.MaxUnusableLines))
             return new Result(false,
                 $"Rekonstruktion unvollständig — {dead}/{totalLines} Linien unbrauchbar ({missing} leer, {unparseable} abgeschnitten), mehr als toleriert; Cache NICHT geschrieben.",
                 course.Course.Data.Count, totalLines, missing, unparseable);

@@ -121,6 +121,11 @@ public class RawCourseCache
     /// <summary>Liefert das (geteilte) Lock-Objekt für einen bid — für den Miss→Fetch→Set-Pfad.</summary>
     public SemaphoreSlim BidLock(string bid) => _bidLocks.GetOrAdd(bid, _ => new SemaphoreSlim(1, 1));
 
+    /// <summary>Die konfigurierte Lücken-Toleranz dieser Instanz — damit Vorab-Prüfungen außerhalb
+    /// (z. B. RawCourseReconstructor) mit DERSELBEN Toleranz prüfen wie SetAsync/GetAsync, statt
+    /// stillschweigend den statischen Default zu verwenden.</summary>
+    public int MaxUnusableLines => _maxUnusableLines;
+
     /// <summary>
     /// Alle gecachten Kurs-Bids auf einen Schlag (für rookhub, um eine Kursliste mit einem
     /// „gecacht"-Flag anzureichern — 1 Call statt N <see cref="ExistsAsync"/>). Bewusst KEINE

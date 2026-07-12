@@ -9,14 +9,15 @@ namespace PirateChess.Api.Tests;
 
 public class RawCourseReconstructorTests
 {
-    private static (RawCourseReconstructor rec, RawCourseCache cache, IServiceScopeFactory sf) Build()
+    private static (RawCourseReconstructor rec, RawCourseCache cache, IServiceScopeFactory sf) Build(
+        int maxUnusableLines = RawCourseCache.DefaultMaxUnusableLines)
     {
         var services = new ServiceCollection();
         var dbName = Guid.NewGuid().ToString();
         services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
         var sp = services.BuildServiceProvider();
         var sf = sp.GetRequiredService<IServiceScopeFactory>();
-        var cache = new RawCourseCache(sf, NullLogger<RawCourseCache>.Instance);
+        var cache = new RawCourseCache(sf, NullLogger<RawCourseCache>.Instance, maxUnusableLines: maxUnusableLines);
         var rec = new RawCourseReconstructor(sf, cache, NullLogger<RawCourseReconstructor>.Instance);
         return (rec, cache, sf);
     }
@@ -111,6 +112,43 @@ public class RawCourseReconstructorTests
         Assert.Equal(0, r.MissingLines);
         Assert.Equal(1, r.UnparseableLines);
         Assert.NotNull(await cache.GetAsync("778"));
+    }
+
+    // Der Pre-Write-Gate muss mit der INSTANZ-Toleranz des Caches prüfen, nicht mit dem statischen
+    // Default: sonst meldet ReconstructAsync bei strenger konfiguriertem Cache Ok=true, während
+    // SetAsync das Schreiben still verweigert (Aufrufer glaubt an einen Cache, den es nie gibt).
+    [Fact]
+    public async Task Reconstruct_UsesCacheInstanceTolerance_NotStaticDefault()
+    {
+        var (rec, cache, sf) = Build(maxUnusableLines: 0);   // strenger als der Default (5)
+
+        // 3 Linien: 2 sauber, 1 fehlt → 1 Lücke, mit Default-Toleranz ok, mit 0 nicht.
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.ChessableRawResponses.Add(new ChessableRawResponse
+            {
+                Endpoint = "course",
+                Url = "https://www.chessable.com/api/v1/getCourse?uid=1&bid=779&includeVariations=true",
+                RawJson = GzipText.Compress("{\"course\":{\"data\":[{\"id\":1,\"total\":3}]}}"),
+                RequestedAt = DateTime.UtcNow
+            });
+            db.ChessableRawResponses.Add(new ChessableRawResponse
+            {
+                Endpoint = "chapter",
+                Url = "https://www.chessable.com/api/v1/getList?uid=1&bid=779&lid=1",
+                RawJson = GzipText.Compress("{\"list\":{\"data\":[{\"id\":200},{\"id\":201},{\"id\":202}]}}"),
+                RequestedAt = DateTime.UtcNow
+            });
+            db.CachedRawLines.Add(new CachedRawLine { Oid = 200, LineJsonContent = GzipText.Compress("{\"game\":{}}"), CachedAt = DateTime.UtcNow });
+            db.CachedRawLines.Add(new CachedRawLine { Oid = 201, LineJsonContent = GzipText.Compress("{\"game\":{}}"), CachedAt = DateTime.UtcNow });
+            await db.SaveChangesAsync();
+        }
+
+        var r = await rec.ReconstructAsync("779");
+
+        Assert.False(r.Ok);                          // vorher: Ok=true, aber SetAsync schrieb nie
+        Assert.Null(await cache.GetAsync("779"));
     }
 
     [Fact]
