@@ -101,8 +101,10 @@ public class ChessableHttpService : IChessableHttpService
         // Speed-Stellschrauben (per ENV justierbar). Der Block ist requests-pro-IP-getrieben, NICHT
         // timing-getrieben (Prod-Messung) → der Inter-Request-Delay dient kaum der Block-Vermeidung;
         // Default daher klein gehalten (Block-Vermeidung läuft über die IP-Rotation).
+        // 2026-07-12: Default 10x hochgesetzt (200ms -> 2000ms) auf Zuruf, um den Crawl insgesamt
+        // weniger aggressiv zu fahren (unabhaengig von der IP-Rotations-Logik oben).
         _delayMinMs = Math.Max(0, configuration.GetValue("Chessable:InterRequestDelayMinMs", 0));
-        _delayMaxMs = Math.Max(_delayMinMs + 1, configuration.GetValue("Chessable:InterRequestDelayMaxMs", 200));
+        _delayMaxMs = Math.Max(_delayMinMs + 1, configuration.GetValue("Chessable:InterRequestDelayMaxMs", 2000));
         _parallelLineFetches = Math.Clamp(configuration.GetValue("Chessable:ParallelLineFetches", 1), 1, 16);
         _blockRetryDelayMs = Math.Max(0, configuration.GetValue("Chessable:BlockRetryDelayMs", 1500));
         _requestMaxTimeSec = Math.Clamp(configuration.GetValue("Chessable:RequestMaxTimeSec", 20), 5, 120);
