@@ -74,15 +74,23 @@ namespace piratechess_lib
         public int IsInfo { get; set; }
         /// <summary>Chessable „softFail" — geduldete Alternativzüge je Vollzug/Seite (siehe SoftFailEntry).</summary>
         public List<SoftFailEntry>? SoftFail { get; set; }
+        /// <summary>Anzahl kollidierter Move-Ids beim letzten <see cref="GeneratePGN"/>-Lauf (korrupte
+        /// Chessable-Daten; letzter Zug je Id gewinnt). >0 ⇒ dem PGN können echte Züge fehlen — der
+        /// Aufrufer (PirateChessLib.GetLine) meldet das via RecordError/Diag, damit die Korruption
+        /// nicht als sauberer Export durchrutscht.</summary>
+        public int DuplicateMoveIds { get; private set; }
         public string GeneratePGN(bool allKeyMovesTraining = false, bool noTrainingMove = false)
         {
             string pgn = "";
             SortedList<int, JsonMove> sortedMoves = [];
             Data ??= [];
+            DuplicateMoveIds = 0;
             foreach (JsonMove move in Data)
             {
                 // Indexer statt Add: doppelte Move-Ids (korrupte Chessable-Daten) überschreiben statt
-                // eine ArgumentException zu werfen, die den ganzen Kurs-Export abriss.
+                // eine ArgumentException zu werfen, die den ganzen Kurs-Export abriss — aber zählen,
+                // damit der stille Zugverlust beim Aufrufer sichtbar wird (DuplicateMoveIds).
+                if (sortedMoves.ContainsKey(move.Id)) DuplicateMoveIds++;
                 sortedMoves[move.Id] = move;
 
                 if (move.After is not null and not "")

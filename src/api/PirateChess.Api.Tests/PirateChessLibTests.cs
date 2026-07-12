@@ -155,6 +155,52 @@ public class PirateChessLibTests
 
         var pgn = game.GeneratePGN(noTrainingMove: true);
         Assert.False(string.IsNullOrWhiteSpace(pgn));
+        Assert.Equal(1, game.DuplicateMoveIds); // Kollision wird gezählt, nicht verschluckt
+    }
+
+    // Der tolerante Overwrite bei doppelten Move-Ids darf den Zugverlust nicht verstecken: die Linie
+    // bleibt im Export, aber ErrorCount/ErrorDetails/Diag-Event melden die Korruption (sonst sähe ein
+    // Kurs mit stillschweigend fehlenden Zügen wie ein sauberer Export aus).
+    [Fact]
+    public void GetCourse_DuplicateMoveIds_LineKeptButReported()
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"}]}}",
+            "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":1,\"move\":1,\"san\":\"e4\"},{\"id\":1,\"move\":1,\"san\":\"d4\"}]}}");
+        var lib = new PirateChessLib { restResponseCourse = course };
+        var events = new List<string>();
+        lib.SetErrorDiagEvent(events.Add);
+
+        var (pgn, _) = lib.GetCourse("1", useLocalData: true);
+
+        Assert.Contains("d4", pgn);                                   // Linie bleibt im Export (letzter gewinnt)
+        Assert.Equal(1, lib.ErrorCount);
+        Assert.Single(events);
+        Assert.Contains("Doppelte Move-Ids", lib.ErrorDetails[0]);
+    }
+
+    // Regression für den Skip-Pfad um GeneratePGN in GetLine: wirft GeneratePGN (hier: korruptes
+    // move.after-JSON → JsonException beim Deserialize<ResponseMove>), wird NUR diese Linie
+    // übersprungen und via RecordError/Diag gemeldet — der Kurs-Export läuft weiter.
+    [Fact]
+    public void GetCourse_GeneratePgnThrows_LineSkippedAndReported()
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"},{\"id\":11,\"name\":\"L2\"}]}}",
+            "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"e4\",\"after\":\"{korrupt\"}]}}", // GeneratePGN wirft
+            "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"d4\"}]}}");                      // saubere Linie
+        var lib = new PirateChessLib { restResponseCourse = course };
+        var events = new List<string>();
+        lib.SetErrorDiagEvent(events.Add);
+
+        var (pgn, _) = lib.GetCourse("1", useLocalData: true);
+
+        Assert.Equal(1, lib.ErrorCount);
+        Assert.Single(events);
+        Assert.Contains("GeneratePGN übersprungen", lib.ErrorDetails[0]);
+        Assert.Contains("JsonException", lib.ErrorDetails[0]);
+        Assert.DoesNotContain("e4", pgn);   // kaputte Linie übersprungen …
+        Assert.Contains("d4", pgn);         // … die saubere bleibt erhalten
     }
 
     [Fact]

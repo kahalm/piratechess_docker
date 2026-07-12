@@ -290,6 +290,14 @@ namespace piratechess_lib
                     RecordError("GeneratePGN übersprungen (korrupte Zug-/Variantendaten)", ex, content);
                     return;
                 }
+                // Doppelte Move-Ids überschreibt GeneratePGN tolerant (letzter gewinnt) — die Linie
+                // bleibt im Export, aber der mögliche Zugverlust darf nicht unsichtbar sein.
+                var dupIds = game?.Game?.DuplicateMoveIds ?? 0;
+                if (dupIds > 0)
+                {
+                    _errorCount++;
+                    RecordError($"Doppelte Move-Ids in Linie ({dupIds}) — letzter Zug je Id gewann, PGN evtl. unvollständig", null, content);
+                }
 
                 pgnHeader.FEN = game?.Game?.Initial ?? "";
 
