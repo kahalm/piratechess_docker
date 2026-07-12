@@ -43,12 +43,17 @@ public class TestWebApplicationFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
-            // Remove ALL EF Core / DB related registrations
+            // Remove ALL EF Core / DB related registrations.
+            // EF Core 9 verbietet jetzt HART zwei DB-Provider im selben ServiceProvider (EF 8 tolerierte es):
+            // AddDbContext registriert seit EF 9 zusätzlich ein `IDbContextOptionsConfiguration<AppDbContext>`,
+            // das die Pomelo/MySQL-Konfiguration trägt — das muss mit raus, sonst koexistiert MySQL neben
+            // InMemory und der Host wirft „Only a single database provider can be registered".
             var toRemove = services.Where(d =>
                 d.ServiceType == typeof(DbContextOptions<AppDbContext>)
                 || d.ServiceType == typeof(DbContextOptions)
                 || (d.ServiceType.IsGenericType &&
                     d.ServiceType.GetGenericTypeDefinition() == typeof(DbContextOptions<>))
+                || d.ServiceType.FullName?.Contains("IDbContextOptionsConfiguration") == true
                 || d.ImplementationType?.FullName?.Contains("MySql") == true
                 || d.ImplementationType?.FullName?.Contains("Pomelo") == true
             ).ToList();

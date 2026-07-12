@@ -1,5 +1,5 @@
 # Dev target for docker-compose.override.yml
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dev
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS dev
 WORKDIR /app
 
 # Install curl-impersonate-chrome (dev)
@@ -15,7 +15,7 @@ RUN dotnet restore src/api/PirateChess.Api/PirateChess.Api.csproj
 # entrypoint set in override
 
 # Build
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 COPY src/lib/piratechess_lib/ src/lib/piratechess_lib/
 COPY src/api/PirateChess.Api/ src/api/PirateChess.Api/
@@ -24,7 +24,7 @@ RUN dotnet publish src/api/PirateChess.Api/PirateChess.Api.csproj \
     -c Release -o /app/publish --no-restore
 
 # Runtime
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final
 WORKDIR /app
 
 # Install curl-impersonate-chrome
