@@ -14,7 +14,7 @@
 
 ## Stack
 
-- Backend-only Service: ASP.NET 8 API, MariaDB (Pomelo EF Core), SignalR
+- Backend-only Service: ASP.NET 9 API, MariaDB (Pomelo EF Core), SignalR
 - Library: piratechess_lib (namespace `piratechess_lib`, synchronous RestSharp calls)
 - Docker: Gluetun VPN, MariaDB, API (dev via docker-compose.override.yml mit `dotnet watch`)
 - API-Port: 5000
