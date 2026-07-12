@@ -114,6 +114,38 @@ public class PirateChessLibTests
         Assert.Empty(lib.ErrorDetails);
     }
 
+    // Ratio-Guard: scheitern deutlich mehr Linien als ankommen (>10 UND mehr als exportiert), ist das
+    // ein systematisches Parser-Problem — GetCourse wirft dann, statt still einen Rumpf-Kurs zu liefern.
+    [Fact]
+    public void GetCourse_SystematicLineFailure_ThrowsInsteadOfSilentTruncation()
+    {
+        var corrupt = Enumerable.Repeat("{\"game\":{\"initial\":\"\",\"data\":[{\"san\":\"e4\"", 12).ToArray();
+        var lineIds = string.Join(",", Enumerable.Range(10, 13).Select(i => $"{{\"id\":{i},\"name\":\"L{i}\"}}"));
+        var course = OneChapterCourse(
+            $"{{\"list\":{{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{lineIds}]}}}}",
+            [.. corrupt, "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"d4\"}]}}"]);
+        var lib = new PirateChessLib { restResponseCourse = course };
+
+        Assert.Throws<InvalidOperationException>(() => lib.GetCourse("1", useLocalData: true));
+    }
+
+    // …aber vereinzelte korrupte Linien in einem überwiegend gesunden Kurs bleiben tolerierter Skip.
+    [Fact]
+    public void GetCourse_MinorityLineFailure_StillSucceeds()
+    {
+        var clean = Enumerable.Repeat("{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"d4\"}]}}", 12).ToArray();
+        var lineIds = string.Join(",", Enumerable.Range(10, 13).Select(i => $"{{\"id\":{i},\"name\":\"L{i}\"}}"));
+        var course = OneChapterCourse(
+            $"{{\"list\":{{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{lineIds}]}}}}",
+            [.. clean, "{\"game\":{\"initial\":\"\",\"data\":[{\"san\":\"e4\""]);
+        var lib = new PirateChessLib { restResponseCourse = course };
+
+        var ex = Record.Exception(() => lib.GetCourse("1", useLocalData: true));
+
+        Assert.Null(ex);
+        Assert.Equal(1, lib.ErrorCount);
+    }
+
     // Regression (prod, bid 282212): Chessable lieferte in "draws" einen null-Eintrag; die
     // .Where(x => x.Object == ...)-Lambda dereferenzierte ihn → NullReferenceException in
     // GeneratePGN ließ den ganzen Kurs-Abruf scheitern.

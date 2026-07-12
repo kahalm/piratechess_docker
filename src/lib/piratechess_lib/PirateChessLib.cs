@@ -110,6 +110,14 @@ namespace piratechess_lib
                     }
                 }
             }
+            // Schutz gegen SYSTEMATISCHES Versagen: einzelne korrupte Linien werden bewusst nur
+            // übersprungen (siehe GetLine), aber scheitern deutlich mehr Linien als ankommen, ist das
+            // kein Datenproblem mehr, sondern ein Parser-Bug/Totalausfall — dann laut scheitern statt
+            // still einen Rumpf-Kurs als Erfolg zu liefern. Nur im Cache-Pfad (useLocalData): im
+            // Live-Fetch-Pfad zählt _errorCount auch Retry-Versuche und wäre kein fairer Maßstab.
+            if (useLocalData && _errorCount > 10 && _errorCount > _cumLines)
+                throw new InvalidOperationException(
+                    $"Kurs-Export abgebrochen: {_errorCount} übersprungene Linien/Kapitel bei nur {_cumLines} exportierten — systematisches Parser-Problem statt einzelner korrupter Linien (Details siehe Diag-Log/ErrorDetails).");
             return (_pgn.ToString(), coursename);
         }
 
