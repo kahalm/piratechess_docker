@@ -134,23 +134,31 @@ public class ChessableDirectController : ControllerBase
     [HttpPost("course")]
     public async Task<IActionResult> Course([FromBody] DirectCourseRequest request, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(request?.Bearer))
-            return BadRequest(new { message = "Bearer is required" });
-        if (!IsValidBid(request.Bid))
+        if (!IsValidBid(request?.Bid))
             return BadRequest(new { message = "Invalid bid" });
 
-        var mode = string.IsNullOrWhiteSpace(request.Mode) ? "FirstKeyMove" : request.Mode;
+        var mode = string.IsNullOrWhiteSpace(request!.Mode) ? "FirstKeyMove" : request.Mode;
         string[] validModes = ["AllKeyMoves", "FirstKeyMove", "None"];
         if (!validModes.Contains(mode))
             return BadRequest(new { message = "Invalid mode. Use: AllKeyMoves, FirstKeyMove, None" });
 
-        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
-        if (uidError is not null)
-            return BadRequest(new { message = uidError });
+        // Einheitliche Regel aller Kurs-Endpoints (Course/CourseInfo/StartCourse): Bearer ist NUR für
+        // den echten Chessable-Abruf (Cache-Miss) nötig — ein gecachter Kurs wird auch ohne bedient.
+        var bearer = request.Bearer ?? string.Empty;
+        string uid = string.Empty;
+        if (!string.IsNullOrWhiteSpace(bearer))
+        {
+            var (u, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+            if (uidError is not null)
+                return BadRequest(new { message = uidError });
+            uid = u;
+        }
 
         var data = await _rawCache.GetAsync(request.Bid, ct);
         if (data is null)
         {
+            if (string.IsNullOrWhiteSpace(bearer))
+                return BadRequest(new { message = "Bearer is required" });
             // Per-Bid-Lock: kein doppelter Chessable-Abruf desselben Kurses über die VPN-IP.
             var gate = _rawCache.BidLock(request.Bid);
             await gate.WaitAsync(ct);
@@ -159,7 +167,7 @@ public class ChessableDirectController : ControllerBase
                 data = await _rawCache.GetAsync(request.Bid, ct); // Double-Check: paralleler Fetch evtl. fertig
                 if (data is null)
                 {
-                    var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(request.Bearer, uid, request.Bid, ct: ct);
+                    var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(bearer, uid, request.Bid, ct: ct);
                     if (fetchError is not null)
                     {
                         var cleanMessage = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
@@ -242,16 +250,17 @@ public class ChessableDirectController : ControllerBase
     [HttpPost("course/info")]
     public async Task<IActionResult> CourseInfo([FromBody] DirectCourseRequest request, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(request?.Bearer))
-            return BadRequest(new { message = "Bearer is required" });
-        if (!IsValidBid(request.Bid))
+        if (!IsValidBid(request?.Bid))
             return BadRequest(new { message = "Invalid bid" });
 
-        // Gecacht → Gesamtzahl ohne Chessable-Abruf aus den Rohdaten.
-        var cached = await _rawCache.GetAsync(request.Bid, ct);
+        // Gecacht → Gesamtzahl ohne Chessable-Abruf aus den Rohdaten. Bearer wird — wie bei
+        // Course/StartCourse — erst beim Cache-Miss verlangt (echter Chessable-Abruf nötig).
+        var cached = await _rawCache.GetAsync(request!.Bid, ct);
         if (cached is not null)
             return Ok(new DirectCourseInfoResponse(request.Bid, cached.ChapterList.Sum(c => c.ResponseLineList.Count), true));
 
+        if (string.IsNullOrWhiteSpace(request.Bearer))
+            return BadRequest(new { message = "Bearer is required" });
         var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
         if (uidError is not null)
             return BadRequest(new { message = uidError });
@@ -362,6 +371,14 @@ public class ChessableDirectController : ControllerBase
                     data = await _rawCache.GetAsync(bid);
                     if (data is null)
                     {
+                        if (string.IsNullOrWhiteSpace(bearer))
+                        {
+                            // Der Start wurde nur zugelassen, weil der Kurs gecacht war (StartCourse-Gate).
+                            // Ist der Eintrag seither weggefallen, liefe der Chessable-Fetch mit leerem
+                            // Bearer in ein irreführendes „Invalid bearer" — stattdessen den echten Grund melden.
+                            job.Fail("Kurs nicht (mehr) im Rohdaten-Cache und kein Bearer übergeben — Start mit Bearer wiederholen.");
+                            return;
+                        }
                         var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(bearer, uid, bid,
                             onChapterProgress: counter =>
                             {

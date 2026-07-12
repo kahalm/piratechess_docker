@@ -309,6 +309,108 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    /// <summary>Seedet einen VOLLSTÄNDIGEN gecachten Kurs (altes Voll-Blob-Format: Linieninhalt inline,
+    /// Oid 0) — besteht RawCourseCache.IsComplete, damit GetAsync ihn ausliefert.</summary>
+    private async Task SeedCompleteCachedCourseAsync(string bid)
+    {
+        var course = new piratechess_lib.RestResponseCourse
+        {
+            CourseJsonContent = "{\"course\":{\"data\":[{\"id\":1}]}}",
+            ChapterList =
+            [
+                new piratechess_lib.RestResponseChapter
+                {
+                    ChapterJsonContent = "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"}]}}",
+                    ResponseLineList =
+                    [
+                        new piratechess_lib.RestResponseLine
+                        {
+                            Oid = 0,
+                            LineJsonContent = "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"e4\"}]}}"
+                        }
+                    ]
+                }
+            ]
+        };
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<PirateChess.Api.Data.AppDbContext>();
+        db.CachedRawCourses.Add(new PirateChess.Api.Models.Entities.CachedRawCourse
+        {
+            Bid = bid,
+            RestResponseJson = PirateChess.Api.Services.GzipText.Compress(JsonSerializer.Serialize(course)),
+            CachedAt = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task CourseStart_NoBearer_Cached_ReturnsJobId()
+    {
+        // Der Kern des Features: liegt der Kurs im Rohdaten-Cache, startet der Job auch ohne Bearer.
+        await SeedCompleteCachedCourseAsync("424242");
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
+            new { Bearer = "", Bid = "424242", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JobStartResp>(JsonOpts);
+        Assert.False(string.IsNullOrWhiteSpace(body!.JobId));
+    }
+
+    [Fact]
+    public async Task Course_NoBearer_Cached_ReturnsCourse()
+    {
+        // Dieselbe Regel wie bei course/start: gecacht → Bearer optional (synchroner Endpoint).
+        await SeedCompleteCachedCourseAsync("424243");
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "", Bid = "424243", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        Assert.Equal("424243", body!.Bid);
+        Assert.Contains("e4", body.Pgn);
+    }
+
+    [Fact]
+    public async Task Course_NoBearer_NotCached_Returns400()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "", Bid = "999998", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CourseInfo_NoBearer_Cached_ReturnsTotal()
+    {
+        await SeedCompleteCachedCourseAsync("424244");
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/info",
+            new { Bearer = "", Bid = "424244" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseInfoResp>(JsonOpts);
+        Assert.Equal(1, body!.TotalLines);
+        Assert.True(body.Cached);
+    }
+
+    [Fact]
+    public async Task CourseInfo_NoBearer_NotCached_Returns400()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/info",
+            new { Bearer = "", Bid = "999997" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     [Fact]
     public async Task CourseStart_InvalidBearer_Returns400()
     {
@@ -388,5 +490,6 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     private record TunnelStatusResp(int Index, string? ProxyUrl, string Label, bool Active, bool Rotating, bool CoolingDown);
     private record CourseItem(string Bid, string Name);
     private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
+    private record CourseInfoResp(string Bid, int TotalLines, bool Cached);
     private record JobStartResp(string JobId);
 }
