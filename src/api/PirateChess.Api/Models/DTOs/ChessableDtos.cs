@@ -23,6 +23,13 @@ public record DirectCourseRequest(string Bearer, string Bid, string? Mode);
 public record DirectCourseReconstructRequest(string Bid);
 public record DirectCourseResponse(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
 
+// Fetch-freier Parse: bereits (vom Browser/RepCheck) erfasstes rohes Chessable-JSON → PGN, OHNE
+// Chessable-Abruf/VPN und OHNE Bearer. Der Browser hat die Kurs-/Kapitel-/Linien-Antworten als echte
+// eingeloggte Session geholt (passiert Cloudflare); piratechess parst nur. Je Kapitel die getList-Antwort
+// (ChapterJson) + die getGame-Antworten (Lines) in getList-Reihenfolge. Mode wie bei DirectCourseRequest.
+public record DirectCourseParseRequest(string Bid, string? Mode, List<DirectParseChapter>? Chapters);
+public record DirectParseChapter(string? ChapterJson, List<string>? Lines);
+
 // Async-Variante mit Fortschritt: /course/start liefert eine JobId, /course/{jobId} pollt
 // den Fortschritt (Kapitel/Linien) und liefert bei Status "completed" das fertige Pgn.
 public record DirectCourseStartResponse(string JobId);

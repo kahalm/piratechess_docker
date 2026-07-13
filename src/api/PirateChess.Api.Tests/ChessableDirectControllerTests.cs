@@ -484,6 +484,78 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Contains("bulk-cached-1", body!.Bids);
     }
 
+    // --- /api/chessable/direct/course/parse (fetch-freier Parse von browser-erfasstem Roh-JSON) ---
+
+    private const string ParseChapterJson = "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"}]}}";
+    private const string ParseLineJson = "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"col\":\"w\",\"san\":\"e4\"}]}}";
+    private const string ParseKeyLineJson = "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"col\":\"w\",\"san\":\"e4\",\"isKey\":true}]}}";
+
+    [Fact]
+    public async Task Parse_MissingServiceKey_Returns401()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/parse",
+            new { Bid = "1001", Mode = "None", Chapters = new[] { new { ChapterJson = ParseChapterJson, Lines = new[] { ParseLineJson } } } });
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Parse_InvalidBid_Returns400()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/parse",
+            new { Bid = "nope", Mode = "None", Chapters = new[] { new { ChapterJson = ParseChapterJson, Lines = new[] { ParseLineJson } } } });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Parse_InvalidMode_Returns400()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/parse",
+            new { Bid = "1001", Mode = "Nonsense", Chapters = new[] { new { ChapterJson = ParseChapterJson, Lines = new[] { ParseLineJson } } } });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Parse_NoChapters_Returns400()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/parse",
+            new { Bid = "1001", Mode = "None", Chapters = Array.Empty<object>() });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Parse_ValidChapters_ReturnsPgnWithMove_NoTraining()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/parse",
+            new { Bid = "1001", Mode = "None", Chapters = new[] { new { ChapterJson = ParseChapterJson, Lines = new[] { ParseLineJson } } } });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        Assert.Equal("1001", body!.Bid);
+        Assert.Equal("None", body.Mode);
+        Assert.Equal(1, body.ChapterCount);
+        Assert.Equal(1, body.LineCount);
+        Assert.Contains("e4", body.Pgn);
+        Assert.DoesNotContain("%tqu", body.Pgn);   // None-Mode → kein Trainingsmarker
+    }
+
+    [Fact]
+    public async Task Parse_FirstKeyMove_EmitsTrainingMarker()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/parse",
+            new { Bid = "1001", Mode = "FirstKeyMove", Chapters = new[] { new { ChapterJson = ParseChapterJson, Lines = new[] { ParseKeyLineJson } } } });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        Assert.Equal("FirstKeyMove", body!.Mode);
+        Assert.Contains("%tqu", body.Pgn);   // FirstKeyMove + isKey → Trainingsmarker
+    }
+
     private record CachedBidsResp(List<string> Bids);
     private record CachedResp(bool Cached);
     private record DirectTestResp(string Uid, int CourseCount, int? TunnelIndex = null, string? TunnelProxy = null, string? ExitIp = null);

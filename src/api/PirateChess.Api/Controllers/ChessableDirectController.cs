@@ -214,6 +214,73 @@ public class ChessableDirectController : ControllerBase
     }
 
     /// <summary>
+    /// Fetch-freier Parse: nimmt bereits (vom Browser über die RepCheck-Extension) erfasstes rohes
+    /// Chessable-JSON — je Kapitel die getList-Antwort (<c>ChapterJson</c>) plus die getGame-Antworten
+    /// (<c>Lines</c>) in getList-Reihenfolge — und erzeugt daraus dasselbe PGN wie der Live-Abruf, OHNE
+    /// Chessable-Kontakt/VPN und OHNE Bearer. Der Browser hat die Daten als echte eingeloggte Session
+    /// geholt (passiert Cloudflare); piratechess parst hier nur. <c>Mode</c> steuert die Trainingsannotation
+    /// wie bei <see cref="Course"/> ("None"→Repertoire, "FirstKeyMove"→Buch, "AllKeyMoves").
+    /// </summary>
+    [HttpPost("course/parse")]
+    public async Task<IActionResult> ParseCourse([FromBody] DirectCourseParseRequest request, CancellationToken ct)
+    {
+        if (!IsValidBid(request?.Bid))
+            return BadRequest(new { message = "Invalid bid" });
+
+        var mode = string.IsNullOrWhiteSpace(request!.Mode) ? "None" : request.Mode;
+        string[] validModes = ["AllKeyMoves", "FirstKeyMove", "None"];
+        if (!validModes.Contains(mode))
+            return BadRequest(new { message = "Invalid mode. Use: AllKeyMoves, FirstKeyMove, None" });
+
+        var chapters = request.Chapters ?? [];
+        if (chapters.Count == 0)
+            return BadRequest(new { message = "At least one chapter with captured lines is required" });
+
+        // Das getCourse-JSON dient im Local-Mode nur der Kapitel-ITERATION (die id/lid ist dort ungenutzt,
+        // Kapitel/Linien werden rein positionsbasiert gelesen). Daher aus der Kapitelanzahl synthetisieren,
+        // statt auf ein separat erfasstes clientseitiges getCourse zu vertrauen (Anzahl-Mismatch vermieden).
+        var courseJson = "{\"course\":{\"data\":[" +
+            string.Join(",", Enumerable.Range(0, chapters.Count).Select(i => $"{{\"id\":{i}}}")) +
+            "]}}";
+
+        var data = new piratechess_lib.RestResponseCourse { CourseJsonContent = courseJson };
+        foreach (var ch in chapters)
+        {
+            var rc = new piratechess_lib.RestResponseChapter { ChapterJsonContent = ch.ChapterJson };
+            foreach (var ln in ch.Lines ?? [])
+                rc.ResponseLineList.Add(new piratechess_lib.RestResponseLine { LineJsonContent = ln });
+            data.ChapterList.Add(rc);
+        }
+
+        var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
+        switch (mode)
+        {
+            case "AllKeyMoves": lib.AllKeyMovesTraining = true; lib.NoTrainingMove = false; break;
+            case "FirstKeyMove": lib.AllKeyMovesTraining = false; lib.NoTrainingMove = false; break;
+            case "None": lib.AllKeyMovesTraining = false; lib.NoTrainingMove = true; break;
+        }
+
+        lib.SetErrorDiagEvent(detail =>
+            _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel beim Browser-Parse (bid {Bid}): {Detail}", request.Bid, detail));
+
+        string pgn, courseName;
+        try
+        {
+            (pgn, courseName) = await Task.Run(() => lib.GetCourse(request.Bid, useLocalData: true), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Browser-Parse PGN generation failed for bid {Bid}", request.Bid);
+            return BadRequest(new { message = $"PGN generation failed: {ex.Message}" });
+        }
+        if (lib.ErrorCount > 0)
+            _logger.LogWarning("Browser-Parse bid {Bid} mit {Errors} übersprungenen Linien/Kapiteln", request.Bid, lib.ErrorCount);
+
+        var lineCount = data.ChapterList.Sum(c => c.ResponseLineList.Count);
+        return Ok(new DirectCourseResponse(request.Bid, courseName, mode, data.ChapterList.Count, lineCount, pgn));
+    }
+
+    /// <summary>
     /// Startet den tiefen Kurs-Abruf asynchron und liefert eine JobId. Der Fortschritt
     /// (Kapitel/Linien) ist über <c>GET /api/chessable/direct/course/{jobId}</c> abrufbar; dort
     /// kommt bei Status "completed" auch das fertige PGN. Für Fortschrittsanzeige in rookhub.
