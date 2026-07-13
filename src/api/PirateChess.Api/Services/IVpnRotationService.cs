@@ -14,6 +14,13 @@ public interface IVpnRotationService
     /// <see cref="VpnLease.ReportBlocked"/> retired die aktive IP sofort (Hintergrund-Rotation + Wechsel).</summary>
     Task<VpnLease> AcquireAsync(CancellationToken ct = default);
 
+    /// <summary>Wie <see cref="AcquireAsync(CancellationToken)"/>, aber IP-Rotation wird an das
+    /// Chessable-Token (uid) gekoppelt: wechselt die uid gegenüber dem zuletzt bedienten Token
+    /// (z. B. ein zweiter User importiert), rotiert der aktive Tunnel VOR diesem Request auf eine
+    /// frische IP. Solange dieselbe uid abruft, bleibt die IP sticky (keine Rotation je Request/Block).
+    /// <paramref name="chessableUid"/> null/leer = keine Token-Kopplung (wie die parameterlose Variante).</summary>
+    Task<VpnLease> AcquireAsync(string? chessableUid, CancellationToken ct = default);
+
     /// <summary>Liefert ein Lease auf GENAU den Tunnel <paramref name="index"/> (0-basiert), unabhängig vom
     /// sticky round-robin und ohne den aktiven Zeiger zu verschieben — für einen gezielten Test „über genau
     /// diesen VPN". Ein Cooldown wird ignoriert (manueller Trigger), eine laufende Rotation aber abgewartet.

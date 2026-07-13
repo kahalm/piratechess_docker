@@ -20,9 +20,12 @@ public class VpnRotationService : IVpnRotationService
     private readonly List<VpnTunnel> _tunnels;
     private readonly object _activeLock = new();
     private int _active;   // Index des aktuell aktiven Tunnels (sticky)
+    private string? _currentUid;   // Chessable-Token (uid), das die aktuelle IP bedient (guarded by _activeLock)
+    private readonly ILogger _logger;
 
     public VpnRotationService(IHttpClientFactory httpClientFactory, IConfiguration configuration, ILogger<VpnRotationService> logger, VpnIpHealth? ipHealth = null)
     {
+        _logger = logger;
         var proxyUrls = ParseList(configuration["Chessable:ProxyUrls"]) ?? SingleOrEmpty(configuration["Chessable:ProxyUrl"]);
         var controlUrls = ParseList(configuration["Gluetun:ControlUrls"]) ?? SingleOrEmpty(configuration["Gluetun:ControlUrl"]);
 
@@ -42,8 +45,15 @@ public class VpnRotationService : IVpnRotationService
     /// dabei sein Budget, stößt <see cref="VpnTunnel.TryAcquire"/> die Hintergrund-Rotation an und der
     /// nächste Acquire wechselt automatisch. <see cref="VpnLease.ReportBlocked"/> retired ihn sofort.
     /// Nur falls (sehr selten) ALLE rotieren: kurz warten und erneut versuchen.</summary>
-    public async Task<VpnLease> AcquireAsync(CancellationToken ct = default)
+    public Task<VpnLease> AcquireAsync(CancellationToken ct = default) => AcquireAsync(null, ct);
+
+    public async Task<VpnLease> AcquireAsync(string? chessableUid, CancellationToken ct = default)
     {
+        // Token-gekoppelte Rotation: wechselt die uid gegenüber der zuletzt bedienten, rotiert der
+        // aktive Tunnel VOR dem Request auf eine frische IP (jeder Chessable-Account bekommt seine
+        // eigene Exit-IP). Solange dieselbe uid abruft, bleibt die IP sticky — KEINE Rotation je
+        // Request/Budget/Block mehr (Block-Vermeidung läuft jetzt über den langsamen Takt).
+        await MaybeRotateForTokenAsync(chessableUid, ct);
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -69,6 +79,26 @@ public class VpnRotationService : IVpnRotationService
             }
             await Task.Delay(50, ct);
         }
+    }
+
+    /// <summary>Rotiert den aktiven Tunnel auf eine frische IP, wenn sich das Chessable-Token (uid)
+    /// gegenüber dem zuletzt bedienten geändert hat. Erste Nutzung (uid noch unbekannt) und gleiche uid
+    /// rotieren NICHT. null/leere uid = keine Kopplung. Die eigentliche Rotation läuft ausserhalb des
+    /// Locks (drain-aware); der Lock schützt nur das Lesen/Setzen von <see cref="_currentUid"/>.</summary>
+    private async Task MaybeRotateForTokenAsync(string? uid, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(uid)) return;
+        VpnTunnel? toRotate = null;
+        lock (_activeLock)
+        {
+            if (_currentUid is null) { _currentUid = uid; return; }  // erste Nutzung → aktuelle IP behalten
+            if (_currentUid == uid) return;                          // selbes Token → sticky, keine Rotation
+            _currentUid = uid;                                       // Token gewechselt → IP wechseln
+            toRotate = _tunnels[_active];
+        }
+        _logger.LogInformation("Chessable-Token wechselte → rotiere Exit-IP (Tunnel {Label})", toRotate!.Label);
+        try { await toRotate.RotateNowAsync(ct); }
+        catch (Exception ex) { _logger.LogWarning("Token-Rotation fehlgeschlagen: {E}", ex.Message); }
     }
 
     /// <summary>Lease auf GENAU einen Tunnel (0-basiert), unabhängig vom sticky round-robin und OHNE den

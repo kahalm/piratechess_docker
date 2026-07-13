@@ -35,6 +35,19 @@ public class VpnTunnelPoolTests
     }
 
     [Fact]
+    public async Task Acquire_TokenChange_RotatesSameTunnel_StaysOnActive()
+    {
+        // Token-gekoppelte Rotation: gleiche uid → sticky (keine Rotation). Wechselt die uid, rotiert
+        // die IP DESSELBEN aktiven Tunnels (ohne ControlUrl ein No-op) — es wird NICHT auf den nächsten
+        // Tunnel vorgerückt (Gegensatz zu ReportBlocked). Der Proxy bleibt also derselbe.
+        var svc = Build(new() { ["Chessable:ProxyUrls"] = "http://a:8888,http://b:8888" });
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync("uidA")).ProxyUrl);   // erste Nutzung
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync("uidA")).ProxyUrl);   // selbes Token → sticky
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync("uidB")).ProxyUrl);   // Token-Wechsel → gleicher Tunnel
+        Assert.Equal("http://a:8888", (await svc.AcquireAsync("uidB")).ProxyUrl);
+    }
+
+    [Fact]
     public async Task Acquire_ReportBlocked_SwitchesToNextTunnel()
     {
         // Ein gemeldeter Soft-Block retired die aktive IP → der Pool rückt auf den nächsten Tunnel

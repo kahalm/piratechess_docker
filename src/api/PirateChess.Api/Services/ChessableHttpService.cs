@@ -65,6 +65,7 @@ public class ChessableHttpService : IChessableHttpService
     // Retry läuft auf der frischen IP → es genügt ein kurzer Backoff. Konfigurierbar via
     // Chessable:BlockRetryDelayMs.
     private readonly int _blockRetryDelayMs;
+    private readonly bool _rotateOnBlock;
 
     // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
     private const string TlsFlags =
@@ -108,6 +109,10 @@ public class ChessableHttpService : IChessableHttpService
         _parallelLineFetches = Math.Clamp(configuration.GetValue("Chessable:ParallelLineFetches", 1), 1, 16);
         _blockRetryDelayMs = Math.Max(0, configuration.GetValue("Chessable:BlockRetryDelayMs", 1500));
         _requestMaxTimeSec = Math.Clamp(configuration.GetValue("Chessable:RequestMaxTimeSec", 20), 5, 120);
+        // Rotation bei IP-Soft-Block. Default true = bisheriges Verhalten (je Block sofort rotieren).
+        // Prod fährt das neue Token-gekoppelte Modell: Vpn:RotateOnBlock=false + Vpn:RotateAfterRequests
+        // sehr hoch + langsamer Takt → Rotation NUR bei Token-Wechsel (siehe VpnRotationService).
+        _rotateOnBlock = configuration.GetValue("Vpn:RotateOnBlock", true);
     }
 
     /// <summary>Zufällige Inter-Request-Pause (0, wenn beide Delays 0). Nur nach echtem Request nötig.</summary>
@@ -654,7 +659,7 @@ public class ChessableHttpService : IChessableHttpService
         // fix über GENAU diesen Tunnel statt über das round-robin.
         using var lease = pinnedTunnel is int pinIdx
             ? await _vpn.AcquireSpecificAsync(pinIdx, ct)
-            : await _vpn.AcquireAsync(ct);
+            : await _vpn.AcquireAsync(chessableUid, ct);
 
         // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
         // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).
@@ -668,7 +673,10 @@ public class ChessableHttpService : IChessableHttpService
         // verbrannt → sofort retiren (Tunnel rotiert im Hintergrund, Pool wechselt auf den nächsten,
         // bereits ausgeruhten Tunnel). Der Aufrufer fällt dann nur kurz zurück und holt die Linie auf
         // der frischen IP — statt 30 s auf derselben heißen IP zu warten.
-        if (IsSoftBlockedBody(result))
+        // Nur im alten Modell (RotateOnBlock=true) retired ein Block die IP sofort. Im neuen
+        // Token-gekoppelten Modell bleibt die IP sticky (kein Rotate-on-Block) — der langsame Takt
+        // hält die Block-Rate niedrig, gewechselt wird nur bei Token-Wechsel.
+        if (_rotateOnBlock && IsSoftBlockedBody(result))
             lease.ReportBlocked();
 
         return result;
