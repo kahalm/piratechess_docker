@@ -541,6 +541,7 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Equal(1, body.LineCount);
         Assert.Contains("e4", body.Pgn);
         Assert.DoesNotContain("%tqu", body.Pgn);   // None-Mode → kein Trainingsmarker
+        Assert.Contains("[ChessableOid \"10\"]", body.Pgn);   // oid = getList data[].id → für Fortschritts-Zuordnung
     }
 
     [Fact]

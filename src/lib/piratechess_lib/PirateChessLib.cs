@@ -324,15 +324,21 @@ namespace piratechess_lib
                 _cumLines++;
                 _cumulativeLinesEvent?.Invoke(_cumLines.ToString());
 
+                // Chessable-oid (getList-Linien-Id) als Header mitgeben, damit die konsumierende Seite
+                // (rookhub) jede importierte Linie eindeutig ihrer Chessable-Linie zuordnen kann
+                // (Fortschritts-Overlays). Nur wenn vorhanden + numerisch (Header-Injection vermeiden).
+                var oidTag = (!string.IsNullOrWhiteSpace(oid) && oid.All(char.IsAsciiDigit))
+                    ? $"[ChessableOid \"{oid}\"]\n                        " : "";
+
                 _ = (_pgn?.Append($"""
-                        
+
                         [Event "{pgnHeader.Event}"]
                         [Round "{pgnHeader.Round:000}.{pgnHeader.Subround:000}"]
                         [White "{pgnHeader.White}"]
                         [Black "{pgnHeader.Black}"]
                         [FEN "{pgnHeader.FEN}"]
                         [Result "*"]
-
+                        {oidTag}
                         {pgn}
 
 
