@@ -400,4 +400,59 @@ public class PirateChessLibTests
 
         Assert.DoesNotContain("%info", pgn);
     }
+
+    // ---- PGN-Escaping: Sonderzeichen aus Chessable-Texten ------------------
+    // Kapitel-/Linienname mit " zerlegte den Tag-Wert (`[Event "The "Catalan" Setup"]`) → ungültiger
+    // Header, den der rookhub-Import falsch bzw. gar nicht liest.
+    [Fact]
+    public void GetCourse_QuoteInChapterAndLineName_HeadersEscaped()
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"The \\\"Catalan\\\" Setup\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"Line \\\"A\\\"\"}]}}",
+            "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"e4\"}]}}");
+        var lib = new PirateChessLib { restResponseCourse = course };
+
+        var (pgn, _) = lib.GetCourse("1", useLocalData: true);
+
+        Assert.Contains("[Event \"The \\\"Catalan\\\" Setup\"]", pgn);
+        Assert.Contains("[White \"Line \\\"A\\\"\"]", pgn);
+        // Kein unescapetes " mehr im Wert → jede Header-Zeile endet sauber auf "]
+        foreach (var line in pgn.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("[Event") || l.StartsWith("[White")))
+            Assert.EndsWith("\"]", line);
+    }
+
+    [Theory]
+    [InlineData("plain", "plain")]
+    [InlineData("a\"b", "a\\\"b")]
+    [InlineData("a\\b", "a\\\\b")]
+    [InlineData("a\nb", "a b")]      // Zeilenumbrüche sind in einem Tag-Wert nicht erlaubt
+    [InlineData(null, "")]
+    public void EscapeHeader_EscapesQuotesAndBackslashes(string? input, string expected)
+        => Assert.Equal(expected, PirateChessLib.EscapeHeader(input));
+
+    // Ein „}" im Chessable-Kommentar beendete den PGN-Kommentar vorzeitig — der Resttext landete als
+    // Müll im Movetext und die Linie war beim Import unlesbar.
+    [Fact]
+    public void GeneratePGN_BraceInComment_DoesNotBreakCommentBlock()
+    {
+        var game = new Game
+        {
+            Initial = "",
+            Data =
+            [
+                new JsonMove
+                {
+                    Id = 0, Move = 1, San = "e4", Col = "w",
+                    After = "{\"data\":[{\"key\":\"C\",\"val\":\"Schlage } sofort {zurück\"}]}",
+                },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Contains("Schlage ) sofort (zurück", pgn);
+        // Genau ein Kommentarblock: geschweifte Klammern nur noch als Begrenzer.
+        Assert.Equal(1, pgn.Count(c => c == '{'));
+        Assert.Equal(1, pgn.Count(c => c == '}'));
+    }
 }

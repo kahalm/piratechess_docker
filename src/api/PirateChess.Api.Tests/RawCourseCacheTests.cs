@@ -355,6 +355,39 @@ public class RawCourseCacheTests
         Assert.False(await vdb.CachedRawCourses.AnyAsync(c => c.Bid == "poison")); // selbstheilend gelöscht
     }
 
+    // --- Force-Refresh: Cache eines Kurses verwerfen -------------------------
+    // Ohne Delete bediente jeder Treffer ewig den Stand des Erst-Imports; ein vom Autor
+    // aktualisierter Chessable-Kurs kam nie an.
+    [Fact]
+    public async Task DeleteAsync_RemovesCourseAndItsLines()
+    {
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString(); // einmal festlegen → alle Scopes teilen denselben Store
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sp = services.BuildServiceProvider();
+        var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+        var cache = new RawCourseCache(scopeFactory, NullLogger<RawCourseCache>.Instance);
+
+        await cache.SetAsync("bid1", Complete("{\"course\":{\"data\":[]}}"));
+        Assert.NotNull(await cache.GetAsync("bid1"));
+
+        var (removed, lines) = await cache.DeleteAsync("bid1");
+
+        Assert.True(removed);
+        Assert.Equal(1, lines);                       // Linien MÜSSEN mit weg (Resume-Cache!)
+        Assert.Null(await cache.GetAsync("bid1"));
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.False(await db.CachedRawLines.AnyAsync());  // sonst läge der alte Linieninhalt weiter vor
+    }
+
+    [Fact]
+    public async Task DeleteAsync_UnknownBid_NoOp()
+    {
+        var cache = BuildCache();
+        Assert.Equal((false, 0), await cache.DeleteAsync("nope"));
+    }
+
     // gzip+Base64 wie RawCourseCache.Compress (privat) — für das direkte Seeden eines Roh-Eintrags.
     private static string GzipBase64(string text)
     {

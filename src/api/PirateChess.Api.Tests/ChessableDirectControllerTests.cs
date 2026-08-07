@@ -428,6 +428,72 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // --- Force-Refresh: gecachte Rohdaten verwerfen statt ewig den Erst-Import auszuliefern ----
+
+    [Fact]
+    public async Task DeleteCourseCache_Cached_RemovesEntry()
+    {
+        await SeedCompleteCachedCourseAsync("424250");
+        var client = ClientWithServiceKey();
+
+        var del = await client.DeleteAsync("/api/chessable/direct/course/424250/cache");
+        Assert.Equal(HttpStatusCode.OK, del.StatusCode);
+
+        var cached = await client.GetAsync("/api/chessable/direct/course/424250/cached");
+        var body = await cached.Content.ReadFromJsonAsync<CachedResp>(JsonOpts);
+        Assert.False(body!.Cached);   // nächster Abruf holt wirklich frisch von Chessable
+    }
+
+    [Fact]
+    public async Task DeleteCourseCache_NonNumericBid_Returns400()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.DeleteAsync("/api/chessable/direct/course/nope/cache");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Course_ForceRefresh_WithoutBearer_Returns400_EvenIfCached()
+    {
+        // Force-Refresh heißt echter Chessable-Abruf → der „gecacht ⇒ Bearer optional"-Pfad greift nicht.
+        await SeedCompleteCachedCourseAsync("424251");
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "", Bid = "424251", Mode = "None", ForceRefresh = true });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Course_ForceRefresh_DropsCachedRawDataAndRefetches()
+    {
+        await SeedCompleteCachedCourseAsync("424252");
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "some-valid-jwt", Bid = "424252", Mode = "None", ForceRefresh = true });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        // Der gecachte Stand hatte 1 Kapitel/1 Linie („e4"); die Fake-Neuabfrage liefert einen
+        // leeren Kurs → der alte Cache wurde tatsächlich verworfen und nicht wieder bedient.
+        Assert.Equal(0, body!.ChapterCount);
+        Assert.DoesNotContain("e4", body.Pgn);
+    }
+
+    [Fact]
+    public async Task CourseStart_ForceRefresh_WithoutBearer_Returns400_EvenIfCached()
+    {
+        await SeedCompleteCachedCourseAsync("424253");
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
+            new { Bearer = "", Bid = "424253", Mode = "None", ForceRefresh = true });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     [Fact]
     public async Task CourseCached_MissingServiceKey_Returns401()
     {

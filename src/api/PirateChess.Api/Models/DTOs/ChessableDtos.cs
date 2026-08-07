@@ -18,7 +18,10 @@ public record DirectTestResponse(string Uid, int CourseCount, int? TunnelIndex =
 //   "None"         → reines Repertoire-PGN (kein Trainingszug)         → rookhub-Repertoire
 //   "FirstKeyMove" → erster Key-Zug je Linie trainierbar ([%tqu ...])  → rookhub-Buch (default)
 //   "AllKeyMoves"  → alle Key-Züge trainierbar
-public record DirectCourseRequest(string Bearer, string Bid, string? Mode);
+// ForceRefresh: verwirft VOR dem Abruf die gecachten Rohdaten des Kurses (inkl. Linien) und holt ihn
+// wirklich neu von Chessable — ohne das Flag bedient jeder Cache-Treffer ewig den Stand des
+// Erst-Imports (ein vom Autor aktualisierter Kurs käme nie an). Braucht zwingend einen Bearer.
+public record DirectCourseRequest(string Bearer, string Bid, string? Mode, bool ForceRefresh = false);
 /// <summary>Wartung: Cache eines bids aus gespeicherten Rohdaten rekonstruieren (kein Bearer nötig).</summary>
 public record DirectCourseReconstructRequest(string Bid);
 public record DirectCourseResponse(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);

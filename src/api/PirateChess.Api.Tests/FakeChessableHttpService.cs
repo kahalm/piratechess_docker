@@ -43,6 +43,7 @@ public class FakeChessableHttpService : IChessableHttpService
         Action<string>? onCumulativeLines = null,
         Action<string>? onRetry = null,
         Action<int>? onTotalLines = null,
+        bool bypassLineCache = false,
         CancellationToken ct = default)
     {
         var course = new RestResponseCourse

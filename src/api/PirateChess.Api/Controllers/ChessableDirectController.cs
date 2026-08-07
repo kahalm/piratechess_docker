@@ -154,7 +154,8 @@ public class ChessableDirectController : ControllerBase
             uid = u;
         }
 
-        var data = await _rawCache.GetAsync(request.Bid, ct);
+        // ForceRefresh: gecachte Rohdaten überspringen (und unten im Lock löschen) → echter Neu-Abruf.
+        var data = request.ForceRefresh ? null : await _rawCache.GetAsync(request.Bid, ct);
         if (data is null)
         {
             if (string.IsNullOrWhiteSpace(bearer))
@@ -164,10 +165,16 @@ public class ChessableDirectController : ControllerBase
             await gate.WaitAsync(ct);
             try
             {
-                data = await _rawCache.GetAsync(request.Bid, ct); // Double-Check: paralleler Fetch evtl. fertig
+                // Force-Refresh UMGEHT den Cache, statt ihn vorher zu löschen: `CachedRawLines` ist
+                // der einzige dauerhafte Linien-Speicher (das Audit hat nur 14 Tage Retention).
+                // Vorab-Löschen hieße: scheitert der Abruf (Chessable-Block, totes Bearer), ist ein
+                // vorher funktionierender Kurs unwiederbringlich weg. Bei Erfolg überschreibt der
+                // Upsert die alten Einträge ohnehin.
+                data = request.ForceRefresh ? null : await _rawCache.GetAsync(request.Bid, ct); // Double-Check: paralleler Fetch evtl. fertig
                 if (data is null)
                 {
-                    var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(bearer, uid, request.Bid, ct: ct);
+                    var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(
+                        bearer, uid, request.Bid, bypassLineCache: request.ForceRefresh, ct: ct);
                     if (fetchError is not null)
                     {
                         var cleanMessage = fetchError.Trim() is "{}" or "" ? "Invalid bearer" : fetchError;
@@ -292,6 +299,18 @@ public class ChessableDirectController : ControllerBase
             ? Ok(new { cached = await _rawCache.ExistsAsync(bid, ct) })
             : BadRequest(new { message = "Invalid bid" });
 
+    /// <summary>Wartung/Force-Refresh: verwirft die gecachten Rohdaten eines Kurses (Struktur + Linien),
+    /// damit der nächste Abruf ihn wirklich neu von Chessable holt. Ohne das bedient jeder Cache-Treffer
+    /// dauerhaft den Stand des Erst-Imports — Kurs-Updates des Autors kämen nie an.</summary>
+    [HttpDelete("course/{bid}/cache")]
+    public async Task<IActionResult> DeleteCourseCache(string bid, CancellationToken ct)
+    {
+        if (!IsValidBid(bid))
+            return BadRequest(new { message = "Invalid bid" });
+        var (removed, lines) = await _rawCache.DeleteAsync(bid, ct);
+        return Ok(new { removed, lines });
+    }
+
     /// <summary>Alle gecachten Kurs-Bids auf einmal — rookhub reichert damit die Kursliste mit einem
     /// „gecacht/sofort verfügbar"-Flag an (1 Call statt N).</summary>
     [HttpGet("courses/cached")]
@@ -375,7 +394,8 @@ public class ChessableDirectController : ControllerBase
         string uid = string.Empty;
         if (string.IsNullOrWhiteSpace(bearer))
         {
-            if (await _rawCache.GetAsync(request.Bid, ct) is null)
+            // Force-Refresh heißt echter Chessable-Abruf → der Cache-Fallback greift hier nicht.
+            if (request.ForceRefresh || await _rawCache.GetAsync(request.Bid, ct) is null)
                 return BadRequest(new { message = "Bearer is required" });
             // gecacht → uid bleibt leer (im Cache-Pfad ungenutzt)
         }
@@ -390,7 +410,7 @@ public class ChessableDirectController : ControllerBase
         var jobId = Guid.NewGuid().ToString("N");
         _jobStore.Create(jobId);
         // Fire-and-forget: _chessableHttp + _jobStore sind Singletons → nach Controller-Dispose gültig.
-        _ = Task.Run(() => RunFetchAsync(jobId, bearer, uid, request.Bid, mode));
+        _ = Task.Run(() => RunFetchAsync(jobId, bearer, uid, request.Bid, mode, request.ForceRefresh));
         return Ok(new DirectCourseStartResponse(jobId));
     }
 
@@ -415,7 +435,7 @@ public class ChessableDirectController : ControllerBase
         return Ok(dto);
     }
 
-    private async Task RunFetchAsync(string jobId, string bearer, string uid, string bid, string mode)
+    private async Task RunFetchAsync(string jobId, string bearer, string uid, string bid, string mode, bool forceRefresh = false)
     {
         var job = _jobStore.Get(jobId);
         if (job is null) return;
@@ -425,7 +445,7 @@ public class ChessableDirectController : ControllerBase
         {
             // Rohdaten aus dem (kurs-/bid-weiten) Cache wiederverwenden → kein Chessable-Call,
             // auch wenn ein anderer User denselben Kurs schon geholt hat.
-            var data = await _rawCache.GetAsync(bid);
+            var data = forceRefresh ? null : await _rawCache.GetAsync(bid);
             if (data is null)
             {
                 // Per-Bid-Lock: zwei parallele Cache-Misses desselben Kurses sollen nicht beide über
@@ -435,7 +455,9 @@ public class ChessableDirectController : ControllerBase
                 await gate.WaitAsync();
                 try
                 {
-                    data = await _rawCache.GetAsync(bid);
+                    // Force-Refresh umgeht den Cache (siehe Course-Endpoint): der alte Stand bleibt
+                    // stehen, bis der neue Abruf wirklich durch ist.
+                    data = forceRefresh ? null : await _rawCache.GetAsync(bid);
                     if (data is null)
                     {
                         if (string.IsNullOrWhiteSpace(bearer))
@@ -460,7 +482,8 @@ public class ChessableDirectController : ControllerBase
                             {
                                 if (int.TryParse(total.Trim(), out var l)) job.LinesDone = l;
                             },
-                            onTotalLines: t => job.LinesTotal = t);
+                            onTotalLines: t => job.LinesTotal = t,
+                            bypassLineCache: forceRefresh);
 
                         if (fetchError is not null)
                         {

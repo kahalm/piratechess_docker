@@ -528,6 +528,13 @@ namespace piratechess_lib
             comment = comment.Replace("</bold>", "").Replace("<bold>", "");
             comment = findHtmltags().Replace(comment, "");
 
+            // Geschweifte Klammern aus dem Chessable-Text neutralisieren: der Kommentar wird später in
+            // PGN als {…} gewrappt — ein „}" im Text beendet den Kommentar vorzeitig und der Rest rutscht
+            // als Müll in den Movetext (Linie/Kurs wird beim Import unlesbar). PGN kennt kein Escaping
+            // innerhalb von {…}, also durch runde Klammern ersetzen (die kommen dort ohnehin vor,
+            // siehe @@StartBracket@@ oben).
+            comment = comment.Replace('{', '(').Replace('}', ')');
+
             return comment;
         }
 

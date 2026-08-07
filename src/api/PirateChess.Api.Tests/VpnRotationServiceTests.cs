@@ -237,16 +237,88 @@ public class VpnRotationServiceTests
         Assert.True(runningCount >= 2, $"expected recovery restart, running PUTs={runningCount}");
     }
 
-    private static VpnRotationService BuildService(HttpMessageHandler handler)
+    // --- Token-gekoppelte Rotation: Ping-Pong dämpfen -----------------------
+    // Verschränken sich ein langer Import (uid A) und Einzel-Requests eines anderen Bearers (uid B),
+    // erzwang JEDER uid-Wechsel eine volle, synchron abgewartete Rotation (~10–20 s) — hin und zurück.
+    // Solange die aktuelle IP ihre Mindest-Haltedauer nicht erfüllt hat, wird gar nicht rotiert.
+    [Fact]
+    public async Task TokenRotation_UidPingPongWithinMinHold_DoesNotRotate()
+    {
+        var stops = 0;
+        var handler = new StubHandler(async req =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+            if (body.Contains("stopped")) Interlocked.Increment(ref stops);
+            if (req.RequestUri!.AbsolutePath.Contains("publicip"))
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("""{"public_ip":"1.2.3.4"}""") };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+        var svc = BuildService(handler, minHoldSec: 600, rotateAfter: 1000);
+
+        (await svc.AcquireAsync("uidA", CancellationToken.None)).Dispose();  // erste Nutzung
+        (await svc.AcquireAsync("uidB", CancellationToken.None)).Dispose();  // Fremd-Request …
+        (await svc.AcquireAsync("uidA", CancellationToken.None)).Dispose();  // … und zurück zum Import
+        (await svc.AcquireAsync("uidB", CancellationToken.None)).Dispose();
+
+        // Die IP ist noch innerhalb ihrer Haltedauer → kein einziger stop/start-Zyklus.
+        Assert.Equal(0, stops);
+    }
+
+    [Fact]
+    public async Task TokenRotation_MinHoldZero_RotatesOnEveryUidChange()
+    {
+        // Abgrenzung: ohne Haltedauer (Vpn:TokenMinHoldSec=0) bleibt das bisherige Verhalten —
+        // jeder Token-Wechsel bekommt seine eigene Exit-IP.
+        var stops = 0;
+        var handler = new StubHandler(async req =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+            if (body.Contains("stopped")) Interlocked.Increment(ref stops);
+            if (req.RequestUri!.AbsolutePath.Contains("publicip"))
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("""{"public_ip":"1.2.3.4"}""") };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+        var svc = BuildService(handler, minHoldSec: 0, rotateAfter: 1000);
+
+        (await svc.AcquireAsync("uidA", CancellationToken.None)).Dispose();
+        (await svc.AcquireAsync("uidB", CancellationToken.None)).Dispose();
+        (await svc.AcquireAsync("uidA", CancellationToken.None)).Dispose();
+
+        Assert.Equal(2, stops);
+    }
+
+    [Fact]
+    public async Task TokenRotation_SameUid_NeverRotates()
+    {
+        var stops = 0;
+        var handler = new StubHandler(async req =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+            await Task.CompletedTask;
+            if (body.Contains("stopped")) Interlocked.Increment(ref stops);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+        var svc = BuildService(handler, minHoldSec: 0, rotateAfter: 1000);
+
+        (await svc.AcquireAsync("uidA", CancellationToken.None)).Dispose();
+        (await svc.AcquireAsync("uidA", CancellationToken.None)).Dispose();
+
+        Assert.Equal(0, stops);
+    }
+
+    private static VpnRotationService BuildService(HttpMessageHandler handler, int minHoldSec = 0, int rotateAfter = 1)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Gluetun:ControlUrl"] = "http://gluetun:8000",
                 ["Vpn:Enabled"] = "true",
-                ["Vpn:RotateAfterRequests"] = "1",
+                ["Vpn:RotateAfterRequests"] = rotateAfter.ToString(),
                 ["Vpn:RestartPauseMs"] = "0",   // keine 3s-Pause im Test
                 ["Vpn:ProxyProbeUrl"] = "",     // Proxy-Readiness-Probe überspringen
+                ["Vpn:TokenMinHoldSec"] = minHoldSec.ToString(),
             })
             .Build();
 

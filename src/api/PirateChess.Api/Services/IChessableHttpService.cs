@@ -20,6 +20,9 @@ public interface IChessableHttpService
         Action<string>? onCumulativeLines = null,
         Action<string>? onRetry = null,
         Action<int>? onTotalLines = null,
+        /// <summary>Force-Refresh: den Linien-Resume-Cache übergehen (statt ihn vorher zu löschen —
+        /// bei einem gescheiterten Abruf bliebe sonst nichts übrig).</summary>
+        bool bypassLineCache = false,
         CancellationToken ct = default);
 
     Task<(int? totalLines, string? error)> GetCourseLineCountAsync(

@@ -21,11 +21,18 @@ public class VpnRotationService : IVpnRotationService
     private readonly object _activeLock = new();
     private int _active;   // Index des aktuell aktiven Tunnels (sticky)
     private string? _currentUid;   // Chessable-Token (uid), das die aktuelle IP bedient (guarded by _activeLock)
+    private DateTime _currentUidSince = DateTime.MinValue;  // wann die aktuelle IP dieser uid zugeordnet wurde (guarded by _activeLock)
+    private readonly TimeSpan _tokenMinHold;
     private readonly ILogger _logger;
 
     public VpnRotationService(IHttpClientFactory httpClientFactory, IConfiguration configuration, ILogger<VpnRotationService> logger, VpnIpHealth? ipHealth = null)
     {
         _logger = logger;
+        // Mindest-Haltedauer einer uid auf der aktuellen IP. Ohne sie rotiert JEDER uid-Wechsel sofort
+        // (~10–20 s synchron) — verschränken sich ein langer Import von User A und einzelne Requests
+        // von User B (z. B. der nächtliche Kurslisten-Refresh), erzeugt das Ping-Pong-Rotationen, die
+        // den Import ausbremsen und „rotation failed"-Warnungen produzieren.
+        _tokenMinHold = TimeSpan.FromSeconds(Math.Max(0, configuration.GetValue("Vpn:TokenMinHoldSec", 120)));
         var proxyUrls = ParseList(configuration["Chessable:ProxyUrls"]) ?? SingleOrEmpty(configuration["Chessable:ProxyUrl"]);
         var controlUrls = ParseList(configuration["Gluetun:ControlUrls"]) ?? SingleOrEmpty(configuration["Gluetun:ControlUrl"]);
 
@@ -84,16 +91,34 @@ public class VpnRotationService : IVpnRotationService
     /// <summary>Rotiert den aktiven Tunnel auf eine frische IP, wenn sich das Chessable-Token (uid)
     /// gegenüber dem zuletzt bedienten geändert hat. Erste Nutzung (uid noch unbekannt) und gleiche uid
     /// rotieren NICHT. null/leere uid = keine Kopplung. Die eigentliche Rotation läuft ausserhalb des
-    /// Locks (drain-aware); der Lock schützt nur das Lesen/Setzen von <see cref="_currentUid"/>.</summary>
+    /// Locks (drain-aware); der Lock schützt nur das Lesen/Setzen von <see cref="_currentUid"/>.
+    ///
+    /// Gedämpft durch <see cref="_tokenMinHold"/>: innerhalb der Haltedauer wird höchstens EINMAL
+    /// token-bedingt rotiert. Schiebt sich also ein fremder Bearer (Kursliste/Info) zwischen zwei
+    /// Requests eines laufenden Imports, teilt er sich kurzzeitig dessen IP, statt zwei volle
+    /// stop/start-Zyklen (je ~10–20 s synchron) zu erzwingen — der Import kroch sonst.</summary>
     private async Task MaybeRotateForTokenAsync(string? uid, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(uid)) return;
         VpnTunnel? toRotate = null;
         lock (_activeLock)
         {
-            if (_currentUid is null) { _currentUid = uid; return; }  // erste Nutzung → aktuelle IP behalten
-            if (_currentUid == uid) return;                          // selbes Token → sticky, keine Rotation
-            _currentUid = uid;                                       // Token gewechselt → IP wechseln
+            if (_currentUid is null)                                  // erste Nutzung → aktuelle IP behalten
+            {
+                _currentUid = uid;
+                _currentUidSince = DateTime.UtcNow;
+                return;
+            }
+            if (_currentUid == uid) return;                           // selbes Token → sticky, keine Rotation
+            _currentUid = uid;                                        // Token gewechselt → IP wechseln …
+            var held = DateTime.UtcNow - _currentUidSince;
+            if (held < _tokenMinHold)                                 // … außer die IP ist noch „frisch"
+            {
+                _logger.LogDebug("Token-Wechsel innerhalb der Mindest-Haltedauer ({Held:0.#}s < {Hold:0.#}s) → keine Rotation",
+                    held.TotalSeconds, _tokenMinHold.TotalSeconds);
+                return;
+            }
+            _currentUidSince = DateTime.UtcNow;
             toRotate = _tunnels[_active];
         }
         _logger.LogInformation("Chessable-Token wechselte → rotiere Exit-IP (Tunnel {Label})", toRotate!.Label);

@@ -212,6 +212,23 @@ namespace piratechess_lib
             return coursename;
         }
 
+        /// <summary>
+        /// Macht einen Kapitel-/Linien-Namen als PGN-Header-Wert sicher. Event/White/Black kommen roh
+        /// aus Chessable: ein <c>"</c> im Namen (z. B. „The "Catalan" Setup") würde den Tag mitten im Wert
+        /// beenden — der Rest rutscht als Müll in die Tag-Section und der Import liest den Namen falsch
+        /// bzw. bricht ab. Laut PGN-Spec werden <c>\</c> und <c>"</c> im Tag-Wert mit Backslash escaped;
+        /// Zeilenumbrüche sind in einem Tag gar nicht erlaubt → zu Leerzeichen normalisieren.
+        /// </summary>
+        public static string EscapeHeader(string? value)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            return value
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\r", " ")
+                .Replace("\n", " ");
+        }
+
         private void GetLine(JsonSerializerOptions caseInvariant, PgnInfo pgnHeader, string oid, RestResponseChapter? restResponseChapter, int lineCounter, bool useLocalData = false, string json = "")
         {
             string? content = null;
@@ -332,11 +349,11 @@ namespace piratechess_lib
 
                 _ = (_pgn?.Append($"""
 
-                        [Event "{pgnHeader.Event}"]
+                        [Event "{EscapeHeader(pgnHeader.Event)}"]
                         [Round "{pgnHeader.Round:000}.{pgnHeader.Subround:000}"]
-                        [White "{pgnHeader.White}"]
-                        [Black "{pgnHeader.Black}"]
-                        [FEN "{pgnHeader.FEN}"]
+                        [White "{EscapeHeader(pgnHeader.White)}"]
+                        [Black "{EscapeHeader(pgnHeader.Black)}"]
+                        [FEN "{EscapeHeader(pgnHeader.FEN)}"]
                         [Result "*"]
                         {oidTag}
                         {pgn}

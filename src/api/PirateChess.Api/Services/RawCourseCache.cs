@@ -112,6 +112,57 @@ public class RawCourseCache
     public async Task<bool> ExistsAsync(string bid, CancellationToken ct = default)
         => await GetAsync(bid, ct) is not null;
 
+    /// <summary>
+    /// Wirft die Rohdaten eines Kurses weg (Force-Refresh) — Kurs-Struktur UND die Rohinhalte seiner
+    /// Linien. Die Linien MÜSSEN mit weg: der Fetch liest sie sonst aus dem Resume-Cache
+    /// (<see cref="RawLineCache"/>) statt von Chessable, und der „frische" Abruf lieferte erneut den
+    /// Stand des Erst-Imports (aktualisierte Chessable-Kurse kämen nie an). Oids sind global eindeutig
+    /// und gehören genau einer Linie eines Kurses → das Löschen trifft keinen anderen Kurs.
+    /// Liefert (Eintrag existierte, Anzahl gelöschter Linien).
+    /// </summary>
+    public async Task<(bool Removed, int LinesRemoved)> DeleteAsync(string bid, CancellationToken ct = default)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var row = await db.CachedRawCourses.FirstOrDefaultAsync(c => c.Bid == bid, ct);
+            if (row is null) return (false, 0);
+
+            // Oids aus der gespeicherten Struktur ziehen; ist der Blob kaputt, wird eben nur der
+            // Kurs-Eintrag entfernt (dann bleibt der Linien-Cache stehen — besser als gar nichts löschen).
+            var oids = new List<int>();
+            try
+            {
+                var course = JsonSerializer.Deserialize<RestResponseCourse>(GzipText.Decompress(row.RestResponseJson), JsonOpts);
+                if (course?.ChapterList is not null)
+                    oids = course.ChapterList.SelectMany(ch => ch.ResponseLineList)
+                        .Select(ln => ln.Oid).Where(o => o > 0).Distinct().ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "RawCourseCache.Delete: Struktur von bid {Bid} nicht lesbar — nur Kurs-Eintrag wird gelöscht", bid);
+            }
+
+            var linesRemoved = 0;
+            foreach (var chunk in oids.Chunk(1000))
+            {
+                var rows = await db.CachedRawLines.Where(c => chunk.Contains(c.Oid)).ToListAsync(ct);
+                db.CachedRawLines.RemoveRange(rows);
+                linesRemoved += rows.Count;
+            }
+            db.CachedRawCourses.Remove(row);
+            await db.SaveChangesAsync(ct);
+            _logger.LogInformation("RawCourseCache: Cache für bid {Bid} verworfen ({Lines} Linien) — nächster Abruf holt frisch von Chessable", bid, linesRemoved);
+            return (true, linesRemoved);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RawCourseCache.Delete fehlgeschlagen für bid {Bid}", bid);
+            return (false, 0);
+        }
+    }
+
     // Per-Bid-Lock, damit nicht zwei gleichzeitige Cache-Misses desselben Kurses BEIDE über die (eine)
     // VPN-IP fetchen (verdoppelte Last → höhere Chessable-Block-Rate). Aufrufer: Lock holen, Cache
     // ERNEUT prüfen (double-checked), nur bei weiterhin Miss fetchen. Ein Eintrag je bekanntem bid

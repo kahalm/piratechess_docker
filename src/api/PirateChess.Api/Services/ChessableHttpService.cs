@@ -188,7 +188,7 @@ public class ChessableHttpService : IChessableHttpService
         string content;
         try
         {
-            content = await CurlGetAsync(url, bearer, "courses", uid, ct, pinnedTunnel);
+            content = await CurlGetAsync(url, bearer, "courses", uid, ct, pinnedTunnel, coupleToken: false);
         }
         catch (Exception ex)
         {
@@ -249,7 +249,7 @@ public class ChessableHttpService : IChessableHttpService
         for (int attempt = 0; attempt < 2; attempt++)
         {
             ct.ThrowIfCancellationRequested();
-            try { content = await CurlGetAsync(url, bearer, "course", uid, ct); }
+            try { content = await CurlGetAsync(url, bearer, "course", uid, ct, coupleToken: false); }
             catch (Exception ex)
             {
                 if (attempt == 0) { await Task.Delay(ProxyRetryDelayMs, ct); continue; }
@@ -283,7 +283,7 @@ public class ChessableHttpService : IChessableHttpService
         var sw = Stopwatch.StartNew();
         try
         {
-            var content = await CurlGetAsync(url, bearer, "line", uid, ct);
+            var content = await CurlGetAsync(url, bearer, "line", uid, ct, coupleToken: false);
             sw.Stop();
             var ok = RawLineCache.IsComplete(content);
             var snippet = content is null ? "" : content[..Math.Min(160, content.Length)];
@@ -398,6 +398,7 @@ public class ChessableHttpService : IChessableHttpService
         Action<string>? onCumulativeLines = null,
         Action<string>? onRetry = null,
         Action<int>? onTotalLines = null,
+        bool bypassLineCache = false,
         CancellationToken ct = default)
     {
         // Alle Lifecycle-Logs dieses Scrapes (Retries/Warnungen/Per-Request) für die
@@ -553,8 +554,11 @@ public class ChessableHttpService : IChessableHttpService
                 string round = $"{(chapterIdx + 2):000}.{(lineIdx + 2):000}";
 
                 // Resume-Cache: eine schon einmal erfolgreich geholte Linie (oid) wiederverwenden →
-                // kein Chessable-Call, keine Inter-Request-Pause.
-                string? lineContent = await _lineCache.GetAsync(line.Id, ct);
+                // kein Chessable-Call, keine Inter-Request-Pause. Beim Force-Refresh übergangen —
+                // die Linie wird nach erfolgreichem Abruf per Upsert ersetzt. Bewusst UMGEHEN statt
+                // vorher löschen: scheitert der Abruf (Block, totes Bearer), bleibt der alte,
+                // funktionierende Stand erhalten statt unwiederbringlich weg zu sein.
+                string? lineContent = bypassLineCache ? null : await _lineCache.GetAsync(line.Id, ct);
                 bool fromCache = lineContent is not null;
 
                 if (!fromCache)
@@ -651,7 +655,11 @@ public class ChessableHttpService : IChessableHttpService
         return (restResponseCourse, null);
     }
 
-    private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct, int? pinnedTunnel = null)
+    /// <param name="coupleToken">Ob dieser Request die token-gekoppelte IP-Rotation auslösen darf.
+    /// Nur der tiefe Kurs-Abruf (Kurs/Kapitel/Linien) koppelt; leichte Einzel-Requests (Kursliste,
+    /// Bearer-Test, Zeilen-Schätzung, Debug) laufen entkoppelt mit: sonst erzwingt ein einziger
+    /// Fremd-Request mitten in einem Import zwei volle Rotationen (hin und zurück) und bremst ihn aus.</param>
+    private async Task<string> CurlGetAsync(string url, string bearer, string endpoint, string? chessableUid, CancellationToken ct, int? pinnedTunnel = null, bool coupleToken = true)
     {
         // Tunnel leihen: wählt round-robin einen VPN-Tunnel, zählt/rotiert ihn (drain-aware → kein
         // IP-Wechsel mitten im Request, auch parallel) und liefert dessen Proxy. Dispose im finally
@@ -659,7 +667,7 @@ public class ChessableHttpService : IChessableHttpService
         // fix über GENAU diesen Tunnel statt über das round-robin.
         using var lease = pinnedTunnel is int pinIdx
             ? await _vpn.AcquireSpecificAsync(pinIdx, ct)
-            : await _vpn.AcquireAsync(chessableUid, ct);
+            : await _vpn.AcquireAsync(coupleToken ? chessableUid : null, ct);
 
         // Chessable-Username aus dem Bearer ziehen und für die Request-Logs in den
         // LogContext legen → erscheint als user.name (statt OS-User "root", siehe Program.cs).
