@@ -18,9 +18,15 @@ public record DirectTestResponse(string Uid, int CourseCount, int? TunnelIndex =
 //   "None"         → reines Repertoire-PGN (kein Trainingszug)         → rookhub-Repertoire
 //   "FirstKeyMove" → erster Key-Zug je Linie trainierbar ([%tqu ...])  → rookhub-Buch (default)
 //   "AllKeyMoves"  → alle Key-Züge trainierbar
-// ForceRefresh: verwirft VOR dem Abruf die gecachten Rohdaten des Kurses (inkl. Linien) und holt ihn
-// wirklich neu von Chessable — ohne das Flag bedient jeder Cache-Treffer ewig den Stand des
-// Erst-Imports (ein vom Autor aktualisierter Kurs käme nie an). Braucht zwingend einen Bearer.
+// ForceRefresh: UMGEHT den Rohdaten-Cache (Kurs-Struktur + Linien) und holt den Kurs wirklich neu
+// von Chessable; die alten Einträge werden erst nach erfolgreichem Abruf per Upsert ersetzt.
+// Bewusst umgehen statt vorher löschen: scheitert der Abruf (Chessable-Block, totes Bearer), bliebe
+// sonst NICHTS übrig — CachedRawLines ist der einzige dauerhafte Linien-Speicher (das Audit hat nur
+// 14 Tage Retention). Ohne das Flag bedient jeder Cache-Treffer den Stand des Erst-Imports (ein vom
+// Autor aktualisierter Kurs käme nie an). Braucht zwingend einen Bearer.
+// HINWEIS: rookhub setzt das Flag derzeit NIRGENDS — ein Erzwingen für jeden „Aktualisieren"-Lauf
+// würde alle Kurse erneut über die VPN-IPs ziehen (Ban-Risiko). Siehe rookhub/TODO.md,
+// „## Code-Review 2026-08-07".
 public record DirectCourseRequest(string Bearer, string Bid, string? Mode, bool ForceRefresh = false);
 /// <summary>Wartung: Cache eines bids aus gespeicherten Rohdaten rekonstruieren (kein Bearer nötig).</summary>
 public record DirectCourseReconstructRequest(string Bid);
