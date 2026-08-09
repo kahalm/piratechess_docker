@@ -19,7 +19,7 @@ public class VpnController : ControllerBase
     }
 
     // Liefert die reale VPN-Exit-IP → nicht unauthentifiziert preisgeben (Service-zu-Service-Auth,
-    // analog zu /api/chessable/direct/*). POST /rotate bleibt JWT-geschützt.
+    // analog zu /api/chessable/direct/*).
     [ServiceKeyAuth]
     [HttpGet("status")]
     public async Task<IActionResult> GetStatus(CancellationToken ct)
@@ -43,8 +43,12 @@ public class VpnController : ControllerBase
         }
     }
 
-    /// <summary>Erzwingt eine sofortige Rotation der gluetun-Exit-IP (manueller Trigger / Test).</summary>
+    /// <summary>Erzwingt eine sofortige Rotation der gluetun-Exit-IP (manueller Trigger / Test).
+    /// JWT allein reicht NICHT: die Registrierung ist offen, ein bloßes Nutzer-JWT könnte sonst die
+    /// geteilte Exit-IP im Sekundentakt rotieren (Import-DoS). Deshalb zusätzlich der X-Service-Key
+    /// (wie direct/*) — beide Schranken müssen passieren.</summary>
     [Authorize]
+    [ServiceKeyAuth]
     [HttpPost("rotate")]
     public async Task<IActionResult> Rotate(CancellationToken ct)
     {

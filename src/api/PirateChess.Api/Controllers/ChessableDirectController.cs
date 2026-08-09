@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Serilog.Context;
 using PirateChess.Api.Authorization;
 using PirateChess.Api.Models.DTOs;
@@ -11,9 +12,15 @@ namespace PirateChess.Api.Controllers;
 /// The bearer is passed per request and never persisted in piratechess.
 /// Authenticated via the <c>X-Service-Key</c> header (see <see cref="ServiceKeyAuthAttribute"/>).
 /// </summary>
+// Klassenweit kleines Body-Limit: direct-Requests tragen nur Bearer + bid + Mode (wenige KB) — 256 KB
+// lässt reichlich Luft und kappt Body-Fluten. Ausnahme: course/parse (browser-erfasste Roh-Kurse,
+// eigenes größeres Limit an der Action). Dazu ein Fixed-Window-Limiter (Policy "direct", Program.cs):
+// großzügig dimensioniert, damit Fortschritts-Polling + laufende Fetch-Jobs nie abreißen.
 [ApiController]
 [Route("api/chessable/direct")]
 [ServiceKeyAuth]
+[RequestSizeLimit(256 * 1024)]
+[EnableRateLimiting("direct")]
 public class ChessableDirectController : ControllerBase
 {
     private readonly IChessableHttpService _chessableHttp;
@@ -43,8 +50,9 @@ public class ChessableDirectController : ControllerBase
     }
 
     /// <summary>Chessable-Kurs-IDs sind numerisch. bid VOR Cache-Lock/Fetch gegen dieses Format prüfen:
-    /// verhindert, dass beliebige (ungültige) Strings einen Per-bid-Lock im <see cref="RawCourseCache"/>
-    /// anlegen (der nie aufgeräumt wird → langsames Leck) und teure Chessable-Abrufe auslösen.</summary>
+    /// verhindert, dass beliebige (ungültige) Strings Per-bid-Locks im <see cref="RawCourseCache"/>
+    /// anlegen (die Einträge räumen sich zwar per Refcount wieder ab, aber Müll-bids sollen gar nicht
+    /// erst bis dorthin kommen) und teure Chessable-Abrufe auslösen.</summary>
     private static bool IsValidBid(string? bid)
         => !string.IsNullOrEmpty(bid) && bid.Length <= 12 && bid.All(char.IsAsciiDigit);
 
@@ -161,9 +169,8 @@ public class ChessableDirectController : ControllerBase
             if (string.IsNullOrWhiteSpace(bearer))
                 return BadRequest(new { message = "Bearer is required" });
             // Per-Bid-Lock: kein doppelter Chessable-Abruf desselben Kurses über die VPN-IP.
-            var gate = _rawCache.BidLock(request.Bid);
-            await gate.WaitAsync(ct);
-            try
+            // (Dispose des Handles gibt das Lock frei UND räumt den Wörterbuch-Eintrag per Refcount ab.)
+            using (await _rawCache.AcquireBidLockAsync(request.Bid, ct))
             {
                 // Force-Refresh UMGEHT den Cache, statt ihn vorher zu löschen: `CachedRawLines` ist
                 // der einzige dauerhafte Linien-Speicher (das Audit hat nur 14 Tage Retention).
@@ -185,7 +192,6 @@ public class ChessableDirectController : ControllerBase
                     if (data is not null) await _rawCache.SetAsync(request.Bid, data, ct);
                 }
             }
-            finally { gate.Release(); }
         }
 
         var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
@@ -228,7 +234,11 @@ public class ChessableDirectController : ControllerBase
     /// geholt (passiert Cloudflare); piratechess parst hier nur. <c>Mode</c> steuert die Trainingsannotation
     /// wie bei <see cref="Course"/> ("None"→Repertoire, "FirstKeyMove"→Buch, "AllKeyMoves").
     /// </summary>
+    // Eigenes, größeres Body-Limit (überschreibt das klassenweite 256-KB-Limit): hier kommt das rohe
+    // Chessable-JSON GANZER Kurse an (36+ MB dokumentiert, s. RawCourseCache) — Kestrels 28,6-MB-Default
+    // bzw. das Mini-Limit würden den Browser-Import großer Kurse abschneiden. 100 MB als harte Obergrenze.
     [HttpPost("course/parse")]
+    [RequestSizeLimit(100 * 1024 * 1024)]
     public async Task<IActionResult> ParseCourse([FromBody] DirectCourseParseRequest request, CancellationToken ct)
     {
         if (!IsValidBid(request?.Bid))
@@ -450,10 +460,8 @@ public class ChessableDirectController : ControllerBase
             {
                 // Per-Bid-Lock: zwei parallele Cache-Misses desselben Kurses sollen nicht beide über
                 // die VPN-IP fetchen. Nach Lock-Eintritt erneut prüfen (ein paralleler Fetch könnte den
-                // Cache inzwischen gefüllt haben).
-                var gate = _rawCache.BidLock(bid);
-                await gate.WaitAsync();
-                try
+                // Cache inzwischen gefüllt haben). Dispose räumt den Lock-Eintrag per Refcount wieder ab.
+                using (await _rawCache.AcquireBidLockAsync(bid))
                 {
                     // Force-Refresh umgeht den Cache (siehe Course-Endpoint): der alte Stand bleibt
                     // stehen, bis der neue Abruf wirklich durch ist.
@@ -494,7 +502,6 @@ public class ChessableDirectController : ControllerBase
                         if (data is not null) await _rawCache.SetAsync(bid, data);
                     }
                 }
-                finally { gate.Release(); }
             }
 
             if (data is not null)

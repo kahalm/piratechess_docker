@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using piratechess_lib;
@@ -164,13 +163,84 @@ public class RawCourseCache
     }
 
     // Per-Bid-Lock, damit nicht zwei gleichzeitige Cache-Misses desselben Kurses BEIDE über die (eine)
-    // VPN-IP fetchen (verdoppelte Last → höhere Chessable-Block-Rate). Aufrufer: Lock holen, Cache
-    // ERNEUT prüfen (double-checked), nur bei weiterhin Miss fetchen. Ein Eintrag je bekanntem bid
-    // (Kurs-Katalog ist klein) → vernachlässigbarer, dauerhafter Speicher.
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _bidLocks = new();
+    // VPN-IP fetchen (verdoppelte Last → höhere Chessable-Block-Rate). Aufrufer: Lock via
+    // AcquireBidLockAsync holen, Cache ERNEUT prüfen (double-checked), nur bei weiterhin Miss fetchen.
+    // Refcount statt GetOrAdd-für-immer: der LETZTE Halter/Warter eines bids entfernt seinen Eintrag
+    // wieder aus dem Wörterbuch → die Map wächst nicht mit jedem jemals angefragten bid unbegrenzt
+    // (Defense-in-Depth zusätzlich zur bid-Formatprüfung im Controller).
+    private readonly object _bidLockSync = new();
+    private readonly Dictionary<string, RefCountedBidLock> _bidLocks = new();
 
-    /// <summary>Liefert das (geteilte) Lock-Objekt für einen bid — für den Miss→Fetch→Set-Pfad.</summary>
-    public SemaphoreSlim BidLock(string bid) => _bidLocks.GetOrAdd(bid, _ => new SemaphoreSlim(1, 1));
+    private sealed class RefCountedBidLock
+    {
+        public readonly SemaphoreSlim Sem = new(1, 1);
+        public int RefCount; // nur unter _bidLockSync mutieren; Einträge im Wörterbuch haben IMMER >= 1
+    }
+
+    /// <summary>Aktuell lebende Per-Bid-Lock-Einträge (gehalten oder wartend) — für Tests/Diagnose.</summary>
+    public int ActiveBidLockCount { get { lock (_bidLockSync) return _bidLocks.Count; } }
+
+    /// <summary>
+    /// Nimmt das Per-Bid-Lock für den Miss→Fetch→Set-Pfad (gegenseitiger Ausschluss je bid) und gibt es
+    /// beim Dispose des Handles wieder frei. Wird das Warten abgebrochen (Cancellation), wird die
+    /// Referenz ebenfalls zurückgegeben — es bleibt nie ein verwaister Eintrag stehen.
+    /// </summary>
+    public async Task<IDisposable> AcquireBidLockAsync(string bid, CancellationToken ct = default)
+    {
+        RefCountedBidLock entry;
+        lock (_bidLockSync)
+        {
+            if (!_bidLocks.TryGetValue(bid, out entry!))
+                _bidLocks[bid] = entry = new RefCountedBidLock();
+            entry.RefCount++;
+        }
+        try
+        {
+            await entry.Sem.WaitAsync(ct);
+        }
+        catch
+        {
+            ReleaseBidLockRef(bid, entry); // Warten abgebrochen → Referenz zurück, sonst Leck
+            throw;
+        }
+        return new BidLockHandle(this, bid, entry);
+    }
+
+    private void ReleaseBidLockRef(string bid, RefCountedBidLock entry)
+    {
+        lock (_bidLockSync)
+        {
+            if (--entry.RefCount == 0)
+            {
+                _bidLocks.Remove(bid); // letzter Nutzer räumt auf → begrenztes Wörterbuch
+                entry.Sem.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Handle eines gehaltenen Per-Bid-Locks: Dispose gibt die Semaphore frei und dekrementiert
+    /// den Refcount. Doppeltes Dispose ist unschädlich (idempotent).</summary>
+    private sealed class BidLockHandle : IDisposable
+    {
+        private readonly RawCourseCache _owner;
+        private readonly string _bid;
+        private readonly RefCountedBidLock _entry;
+        private int _disposed;
+
+        public BidLockHandle(RawCourseCache owner, string bid, RefCountedBidLock entry)
+        {
+            _owner = owner;
+            _bid = bid;
+            _entry = entry;
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            _entry.Sem.Release();
+            _owner.ReleaseBidLockRef(_bid, _entry);
+        }
+    }
 
     /// <summary>Die konfigurierte Lücken-Toleranz dieser Instanz — damit Vorab-Prüfungen außerhalb
     /// (z. B. RawCourseReconstructor) mit DERSELBEN Toleranz prüfen wie SetAsync/GetAsync, statt

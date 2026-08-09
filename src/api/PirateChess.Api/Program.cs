@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using PirateChess.Api.BackgroundJobs;
@@ -166,6 +167,23 @@ builder.Services.AddHostedService<RawResponseRetentionService>();
 // SignalR
 builder.Services.AddSignalR();
 
+// Rate-Limiter für /api/chessable/direct/* (benannte Policy "direct", per [EnableRateLimiting] am
+// Controller). EIN gemeinsames Fixed-Window für alle direct-Aufrufer: schützt vor Amok-Schleifen/
+// Missbrauch, ohne legitimen Betrieb zu bremsen — rookhub pollt Fortschritt alle 2,5 s (~24 Requests/min
+// je Import-Job), der Default (300/min) lässt also reichlich Luft. Die langlaufenden Fetch-Jobs selbst
+// laufen im Hintergrund weiter; der Limiter gate't nur die Request-ANNAHME, bricht also nichts ab.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests; // statt Default 503
+    options.AddFixedWindowLimiter("direct", o =>
+    {
+        // Lambda läuft erst beim Aufbau der Middleware → sieht auch Test-Config (WebApplicationFactory).
+        o.PermitLimit = builder.Configuration.GetValue("RateLimit:Direct:PermitLimit", 300);
+        o.Window = TimeSpan.FromSeconds(builder.Configuration.GetValue("RateLimit:Direct:WindowSeconds", 60));
+        o.QueueLimit = 0; // kein Anstellen: über dem Limit sofort 429 (Aufrufer sollen backoffen)
+    });
+});
+
 // Controllers + Swagger
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -231,6 +249,10 @@ app.UseSerilogRequestLogging(options =>
         return LogEventLevel.Information;
     };
 });
+
+// Vor UseAuthorization: geratelimitete Requests werden abgewiesen, BEVOR weitere Pipeline-Arbeit anfällt.
+// Greift nur auf Endpoints mit [EnableRateLimiting]-Policy (direct/*) — /health & Co. bleiben unlimitiert.
+app.UseRateLimiter();
 
 app.UseAuthorization();
 

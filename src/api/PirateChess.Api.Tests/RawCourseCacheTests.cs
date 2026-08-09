@@ -388,6 +388,72 @@ public class RawCourseCacheTests
         Assert.Equal((false, 0), await cache.DeleteAsync("nope"));
     }
 
+    // --- Per-Bid-Lock: Refcount-Aufräumen (kein unbegrenzt wachsendes Semaphoren-Wörterbuch) ------
+
+    [Fact]
+    public async Task AcquireBidLock_LastHolderRemovesEntry()
+    {
+        var cache = BuildCache();
+
+        var handles = new List<IDisposable>();
+        for (var i = 0; i < 100; i++)
+            handles.Add(await cache.AcquireBidLockAsync("bid" + i));
+        Assert.Equal(100, cache.ActiveBidLockCount); // während des Haltens leben die Einträge
+
+        foreach (var h in handles) h.Dispose();
+        Assert.Equal(0, cache.ActiveBidLockCount); // letzter Halter räumt auf → kein Leck über die Laufzeit
+    }
+
+    [Fact]
+    public async Task AcquireBidLock_SameBid_IsMutuallyExclusive()
+    {
+        var cache = BuildCache();
+
+        var first = await cache.AcquireBidLockAsync("bidX");
+        var secondTask = cache.AcquireBidLockAsync("bidX");
+
+        // Der zweite Aufrufer darf NICHT durchrutschen, solange der erste hält (kein frisches
+        // Semaphor durch verfrühtes Aufräumen — der Warter zählt als Referenz mit).
+        var winner = await Task.WhenAny(secondTask, Task.Delay(200));
+        Assert.NotSame(secondTask, winner);
+        Assert.Equal(1, cache.ActiveBidLockCount); // EIN geteilter Eintrag (Halter + Warter)
+
+        first.Dispose();
+        var second = await secondTask; // jetzt kommt der Warter dran
+        second.Dispose();
+        Assert.Equal(0, cache.ActiveBidLockCount);
+    }
+
+    [Fact]
+    public async Task AcquireBidLock_CancelledWaiter_ReleasesItsReference()
+    {
+        var cache = BuildCache();
+
+        var holder = await cache.AcquireBidLockAsync("bidY");
+        using var cts = new CancellationTokenSource();
+        var waiterTask = cache.AcquireBidLockAsync("bidY", cts.Token);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiterTask);
+        holder.Dispose();
+        Assert.Equal(0, cache.ActiveBidLockCount); // abgebrochener Warter hinterlässt keinen Eintrag
+    }
+
+    [Fact]
+    public async Task AcquireBidLock_DoubleDispose_IsHarmless()
+    {
+        var cache = BuildCache();
+
+        var handle = await cache.AcquireBidLockAsync("bidZ");
+        handle.Dispose();
+        handle.Dispose(); // idempotent — kein Release-Überschuss, keine Exception
+        Assert.Equal(0, cache.ActiveBidLockCount);
+
+        // Lock danach normal wiederverwendbar.
+        (await cache.AcquireBidLockAsync("bidZ")).Dispose();
+        Assert.Equal(0, cache.ActiveBidLockCount);
+    }
+
     // gzip+Base64 wie RawCourseCache.Compress (privat) — für das direkte Seeden eines Roh-Eintrags.
     private static string GzipBase64(string text)
     {
