@@ -36,8 +36,16 @@ public record DirectCourseResponse(string Bid, string Name, string Mode, int Cha
 // Chessable-Abruf/VPN und OHNE Bearer. Der Browser hat die Kurs-/Kapitel-/Linien-Antworten als echte
 // eingeloggte Session geholt (passiert Cloudflare); piratechess parst nur. Je Kapitel die getList-Antwort
 // (ChapterJson) + die getGame-Antworten (Lines) in getList-Reihenfolge. Mode wie bei DirectCourseRequest.
-public record DirectCourseParseRequest(string Bid, string? Mode, List<DirectParseChapter>? Chapters);
-public record DirectParseChapter(string? ChapterJson, List<string>? Lines);
+// Browser-Import. LineOids (je Linie ihre Chessable-oid, parallel zu Lines) ordnet die Linien über die oid
+// statt über ihre Position zu; eine Linie ohne Inhalt (null) kommt dann aus dem geteilten Linien-Cache.
+// CourseJson (echte getCourse-Antwort) + Complete=true markieren einen VOLLSTÄNDIG geholten Kurs, der als
+// Ganzes in den Kurs-Cache darf. Alte Clients schicken beides nicht → positionsbasiert wie bisher.
+public record DirectCourseParseRequest(string Bid, string? Mode, List<DirectParseChapter>? Chapters,
+    string? CourseJson = null, bool Complete = false);
+public record DirectParseChapter(string? ChapterJson, List<string?>? Lines, List<string>? LineOids = null);
+// Welche Linien (oids) liegen schon im geteilten Rohdaten-Cache — nur die Existenz, nie der Inhalt.
+public record DirectCachedLinesRequest(List<string>? Oids);
+public record DirectCachedLinesResponse(List<string> Oids);
 
 // Async-Variante mit Fortschritt: /course/start liefert eine JobId, /course/{jobId} pollt
 // den Fortschritt (Kapitel/Linien) und liefert bei Status "completed" das fertige Pgn.

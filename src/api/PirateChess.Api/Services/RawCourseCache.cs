@@ -112,6 +112,26 @@ public class RawCourseCache
         => await GetAsync(bid, ct) is not null;
 
     /// <summary>
+    /// Gibt es für den Kurs schon IRGENDEINEN Eintrag (ohne Laden/Prüfen)? Billige Vorab-Prüfung, bevor ein
+    /// Browser-Upload einen Kurs-Eintrag anlegt — ein vorhandener bleibt unangetastet. Im Fehlerfall
+    /// <c>true</c>: im Zweifel lieber nichts schreiben.
+    /// </summary>
+    public async Task<bool> HasEntryAsync(string bid, CancellationToken ct = default)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            return await db.CachedRawCourses.AsNoTracking().AnyAsync(c => c.Bid == bid, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "RawCourseCache.HasEntry fehlgeschlagen für bid {Bid}", bid);
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Wirft die Rohdaten eines Kurses weg (Force-Refresh) — Kurs-Struktur UND die Rohinhalte seiner
     /// Linien. Die Linien MÜSSEN mit weg: der Fetch liest sie sonst aus dem Resume-Cache
     /// (<see cref="RawLineCache"/>) statt von Chessable, und der „frische" Abruf lieferte erneut den
