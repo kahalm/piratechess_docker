@@ -400,6 +400,23 @@ public class ChessableDirectController : ControllerBase
     }
 
     /// <summary>
+    /// Wartung des geteilten Linien-Caches: prüft Linien so, wie der Parser sie liest. Ungültige werden markiert statt
+    /// gelöscht (Inhalt bleibt), markierte, die inzwischen gültig sind — etwa nach einer Korrektur der Prüfung oder
+    /// des Parsers —, werden wieder freigegeben. <c>all=false</c> (Standard): nur markierte Linien; <c>all=true</c>:
+    /// der ganze Cache (am 2026-09-15 rund 168 000 Linien / 4,9 GB, dauert Minuten). <c>dryRun=true</c> (Standard):
+    /// nur Bericht.
+    /// </summary>
+    [HttpPost("lines/revalidate")]
+    public async Task<IActionResult> RevalidateLines([FromQuery] bool dryRun = true, [FromQuery] bool all = false, CancellationToken ct = default)
+    {
+        var r = await _lineCache.RevalidateAsync(all, apply: !dryRun, ct);
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        return Ok(new DirectLineRevalidationResponse(!dryRun, r.Checked, r.NewlyInvalidCount, r.ClearedCount, r.StillInvalid,
+            r.NewlyInvalid.Select(x => new DirectInvalidLine(x.Oid.ToString(inv), x.Reason)).ToList(),
+            r.Cleared.Select(o => o.ToString(inv)).ToList()));
+    }
+
+    /// <summary>
     /// Startet den tiefen Kurs-Abruf asynchron und liefert eine JobId. Der Fortschritt
     /// (Kapitel/Linien) ist über <c>GET /api/chessable/direct/course/{jobId}</c> abrufbar; dort
     /// kommt bei Status "completed" auch das fertige PGN. Für Fortschrittsanzeige in rookhub.

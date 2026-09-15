@@ -159,6 +159,81 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         Assert.NotNull(await CachedLineAsync(3502));
     }
 
+    private async Task<List<string>> CachedOidsAsync(params string[] oids)
+    {
+        var response = await Client().PostAsJsonAsync("/api/chessable/direct/lines/cached", new { Oids = oids });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(JsonOpts);
+        return body.GetProperty("oids").EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    private Task<CachedRawLine?> CachedRowAsync(int oid)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        return Task.FromResult(db.CachedRawLines.FirstOrDefault(c => c.Oid == oid));
+    }
+
+    [Fact]
+    public async Task Parse_TruncatedCachedLine_IsMarked_NoLongerReportedCached_AndHealedByTheBrowserLine()
+    {
+        // Regression 2026-09-15 (Kurs 207313, oid 36114125): die Linie lag seit Juni abgeschnitten im Cache. Die
+        // Extension hielt sie für gecacht, schickte nur die oid, und der Parser übersprang sie — bei jedem Import, still.
+        const string truncated =
+            "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"col\":\"w\",\"san\":\"e4\",\"ann1\":\"Developing the kni";
+        await SeedLineAsync(3951, truncated);
+        Assert.Contains("3951", await CachedOidsAsync("3951"));   // noch unentdeckt: gilt als gecacht
+
+        var first = await ParseOkAsync(new
+        {
+            Bid = "3950", Mode = "None",
+            Chapters = new[] { Chapter(ChapterJson((3951, "Dubov Italian")), new string?[] { null }, new[] { "3951" }) }
+        });
+        Assert.DoesNotContain("3951", first.Pgn);
+        var marked = await CachedRowAsync(3951);
+        Assert.NotNull(marked!.InvalidAt);
+        Assert.Equal(truncated, GzipText.Decompress(marked.LineJsonContent));   // markiert, nicht gelöscht
+        Assert.DoesNotContain("3951", await CachedOidsAsync("3951"));           // → die Extension holt sie selbst
+
+        var second = await ParseOkAsync(new
+        {
+            Bid = "3950", Mode = "None",
+            Chapters = new[] { Chapter(ChapterJson((3951, "Dubov Italian")), new[] { LineJson("e4") }, new[] { "3951" }) }
+        });
+        Assert.Contains("[ChessableOid \"3951\"]", second.Pgn);
+        Assert.Equal(LineJson("e4"), await CachedLineAsync(3951));               // geheilt
+        Assert.Contains("3951", await CachedOidsAsync("3951"));
+
+        using var scope = _factory.Services.CreateScope();
+        var archived = scope.ServiceProvider.GetRequiredService<AppDbContext>().CachedRawLineArchive.Single(a => a.Oid == 3951);
+        Assert.Equal(truncated, GzipText.Decompress(archived.LineJsonContent));
+    }
+
+    [Fact]
+    public async Task RevalidateLines_DryRunByDefault_ApplyReleasesARepairedLine()
+    {
+        await SeedLineAsync(3961, LineJson("d4"));
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var row = db.CachedRawLines.Single(c => c.Oid == 3961);
+            row.InvalidAt = DateTime.UtcNow;
+            row.InvalidReason = "alte Prüfung";
+            await db.SaveChangesAsync();
+        }
+
+        var dry = await Client().PostAsync("/api/chessable/direct/lines/revalidate", null);
+        Assert.Equal(HttpStatusCode.OK, dry.StatusCode);
+        var dryBody = await dry.Content.ReadFromJsonAsync<JsonElement>(JsonOpts);
+        Assert.False(dryBody.GetProperty("applied").GetBoolean());
+        Assert.Contains("3961", dryBody.GetProperty("clearedOids").EnumerateArray().Select(e => e.GetString()));
+        Assert.NotNull((await CachedRowAsync(3961))!.InvalidAt);
+
+        var apply = await Client().PostAsync("/api/chessable/direct/lines/revalidate?dryRun=false", null);
+        Assert.Equal(HttpStatusCode.OK, apply.StatusCode);
+        Assert.Null((await CachedRowAsync(3961))!.InvalidAt);
+    }
+
     private const string OneChapterCourse = "{\"course\":{\"data\":[{\"id\":1}]}}";
 
     [Fact]

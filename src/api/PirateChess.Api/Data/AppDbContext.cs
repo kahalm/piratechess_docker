@@ -15,6 +15,7 @@ public class AppDbContext : DbContext
     public DbSet<ChessableRawResponse> ChessableRawResponses => Set<ChessableRawResponse>();
     public DbSet<CachedRawCourse> CachedRawCourses => Set<CachedRawCourse>();
     public DbSet<CachedRawLine> CachedRawLines => Set<CachedRawLine>();
+    public DbSet<CachedRawLineArchive> CachedRawLineArchive => Set<CachedRawLineArchive>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -28,6 +29,14 @@ public class AppDbContext : DbContext
         {
             e.HasIndex(c => c.Oid).IsUnique();
             e.Property(c => c.LineJsonContent).HasColumnType("LONGTEXT");
+            e.Property(c => c.InvalidReason).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<CachedRawLineArchive>(e =>
+        {
+            e.HasIndex(c => c.Oid);
+            e.Property(c => c.LineJsonContent).HasColumnType("LONGTEXT");
+            e.Property(c => c.InvalidReason).HasMaxLength(200);
         });
 
         modelBuilder.Entity<AppUser>(e =>

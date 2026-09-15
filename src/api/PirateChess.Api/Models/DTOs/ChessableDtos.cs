@@ -46,6 +46,10 @@ public record DirectParseChapter(string? ChapterJson, List<string?>? Lines, List
 // Welche Linien (oids) liegen schon im geteilten Rohdaten-Cache — nur die Existenz, nie der Inhalt.
 public record DirectCachedLinesRequest(List<string>? Oids);
 public record DirectCachedLinesResponse(List<string> Oids);
+// Wartung des Linien-Caches: ungültige Linien markieren statt löschen, reparierte wieder freigeben.
+public record DirectInvalidLine(string Oid, string Reason);
+public record DirectLineRevalidationResponse(bool Applied, int Checked, int NewlyInvalid, int Cleared, int StillInvalid,
+    List<DirectInvalidLine> NewlyInvalidLines, List<string> ClearedOids);
 
 // Async-Variante mit Fortschritt: /course/start liefert eine JobId, /course/{jobId} pollt
 // den Fortschritt (Kapitel/Linien) und liefert bei Status "completed" das fertige Pgn.

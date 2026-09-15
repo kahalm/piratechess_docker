@@ -133,12 +133,14 @@ public static class BrowserCourseAssembler
     /// Taugt der Inhalt als Eintrag im geteilten Cache? Er muss ein <c>game</c>-Objekt tragen: ein beliebiges
     /// JSON wie <c>{"x":1}</c> parst sonst zu einer leeren Linie und vergiftete den Cache für alle.
     /// </summary>
-    public static bool IsCacheableLine(string? content)
+    public static bool IsCacheableLine(string? content) => RawLineCache.InvalidReason(content) is null;
+
+    /// <summary>Trägt der (syntaktisch gültige) Inhalt ein <c>game</c>-Objekt?</summary>
+    internal static bool HasGameObject(string content)
     {
-        if (!RawLineCache.IsComplete(content)) return false;
         try
         {
-            return JsonNode.Parse(content!) is JsonObject obj && Property(obj, "game") is JsonObject;
+            return JsonNode.Parse(content) is JsonObject obj && Property(obj, "game") is JsonObject;
         }
         catch (JsonException) { return false; }
     }
