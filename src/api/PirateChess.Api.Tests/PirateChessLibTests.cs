@@ -455,4 +455,98 @@ public class PirateChessLibTests
         Assert.Equal(1, pgn.Count(c => c == '{'));
         Assert.Equal(1, pgn.Count(c => c == '}'));
     }
+
+    // ---- Nachbau der echten Linie 20733162 (Kurs 128648) gegen Chessables eigenen PGN-Export ----
+    // Chessable exportiert: „d5 3. e5 (3. Nc3 …) (3. exd5 …) (3. d3 {ist hier in der Zugfolge})
+    // {2.d3 d5 3.Nf3 analysiert.} 3... c5" — ohne doppelte Leerzeichen, ohne Zeilenumbrüche im Text
+    // und mit „3..." vor dem schwarzen Zug nach den Varianten.
+    private static string Json(object o) => System.Text.Json.JsonSerializer.Serialize(o);
+
+    [Fact]
+    public void GeneratePGN_RealLine_MatchesChessableExportFormatting()
+    {
+        const string fenBeforeE5 = "rnbqkbnr/ppp2ppp/4p3/3p4/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq d6 0 3";
+        var introBefore = Json(new
+        {
+            before = StartFen, after = "",
+            data = new object[] { new { key = "V", val = new object[] {
+                new { key = "C", val = "willkommen zum ersten Kapitel. <br/><br/> Es gibt nichts, wenn er @@StartFEN@@x@@EndFEN@@" },
+                new { key = "S", val = "2.d4" },
+                new { key = "C", val = "spielen kann. Alles außer <strong>2.d4</strong>." },
+            } } },
+        });
+        var afterE5 = Json(new
+        {
+            before = fenBeforeE5, after = "",
+            data = new object[]
+            {
+                new { key = "V", val = new object[] {
+                    new { key = "S", val = "3.Nc3" }, new { key = "S", val = "Nf6" },
+                    new { key = "C", val = "werden wir <a class=\"commentMoveSmall\" href=\"/course/128648/3\">später</a> sehen." } } },
+                new { key = "V", val = new object[] {
+                    new { key = "S", val = "3.d3" },
+                    new { key = "C", val = "ist <a href=\"/variation/1\">hier</a> in der Zugfolge @@StartFEN@@x@@EndFEN@@" },
+                    new { key = "S", val = "2.d3" }, new { key = "S", val = "d5" }, new { key = "S", val = "3.Nf3" },
+                    new { key = "C", val = "analysiert." } } },
+            },
+        });
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w", Before = introBefore },
+                new JsonMove { Id = 1, Move = 1, San = "e6", Col = "b" },
+                new JsonMove { Id = 2, Move = 2, San = "Nf3", Col = "w" },
+                new JsonMove { Id = 3, Move = 2, San = "d5", Col = "b" },
+                new JsonMove { Id = 4, Move = 3, San = "e5", Col = "w", After = afterE5 },
+                new JsonMove { Id = 5, Move = 3, San = "c5", Col = "b" },
+                new JsonMove { Id = 6, Move = 4, San = "b4", Col = "w" },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.StartsWith("{willkommen zum ersten Kapitel. Es gibt nichts, wenn er 2.d4 spielen kann. Alles außer 2.d4.} 1. e4 ", pgn);
+        Assert.Contains("3. e5 (3.Nc3 Nf6 {werden wir später sehen.}) (3.d3 {ist hier in der Zugfolge}) "
+            + "{2.d3 d5 3.Nf3 analysiert.} 3... c5 4. b4", pgn);
+        Assert.DoesNotContain("\n", pgn);
+        Assert.DoesNotContain("  ", pgn.TrimEnd());
+    }
+
+    [Fact]
+    public void GeneratePGN_BlackMoveAfterVariation_GetsMoveNumber_OtherwiseNot()
+    {
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w", After = AfterWithV(StartFen, ("S", "1.d4")) },
+                new JsonMove { Id = 1, Move = 1, San = "e5", Col = "b" },
+                new JsonMove { Id = 2, Move = 2, San = "Nf3", Col = "w", After = "{\"data\":[{\"key\":\"C\",\"val\":\"Entwicklung\"}]}" },
+                new JsonMove { Id = 3, Move = 2, San = "Nc6", Col = "b" },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Equal("1. e4 (1.d4) 1... e5 2. Nf3 {Entwicklung} Nc6 ", pgn);   // nach Kommentar keine Nummer (wie Chessable)
+    }
+
+    [Fact]
+    public void GeneratePGN_LineStartingWithBlack_StartsWithEllipsis()
+    {
+        var game = new Game
+        {
+            Initial = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "c5", Col = "b" },
+                new JsonMove { Id = 1, Move = 2, San = "Nf3", Col = "w" },
+            ],
+        };
+
+        Assert.Equal("1... c5 2. Nf3 ", game.GeneratePGN(noTrainingMove: true));
+    }
 }

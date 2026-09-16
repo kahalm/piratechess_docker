@@ -201,6 +201,11 @@ namespace piratechess_lib
             int lastMove = 0;
             // Vollzugnummer des Linienbeginns — softFail ist ab da 0-basiert indiziert.
             int firstMoveNum = sortedMoves.Count > 0 ? sortedMoves.Values.First().Move : 1;
+            // Zugnummern wie im Chessable-Export: „N." vor Weiß, „N..." vor Schwarz, wenn Schwarz die Linie
+            // beginnt oder direkt nach Varianten zieht (sonst ordnet ein strenger PGN-Leser den Zug nicht zu).
+            var initialParts = (Initial ?? "").Split(' ');
+            bool blackStarts = initialParts.Length > 1 && initialParts[1] == "b";
+            bool afterVariations = false;
             foreach (JsonMove move in sortedMoves.Values)
             {
                 if (move.CommentBefore != "")
@@ -210,7 +215,11 @@ namespace piratechess_lib
 
                 if (lastMove < move.Move)
                 {
-                    pgn += $"{move.Move}. ";
+                    pgn += lastMove == 0 && blackStarts ? $"{move.Move}... " : $"{move.Move}. ";
+                }
+                else if (afterVariations)
+                {
+                    pgn += $"{move.Move}... ";
                 }
                 pgn += move.San + " ";
 
@@ -282,6 +291,7 @@ namespace piratechess_lib
                 {
                     pgn += move.CommentVariations + " ";
                 }
+                afterVariations = move.CommentVariations != "";
 
                 lastMove = move.Move;
             }
@@ -504,7 +514,9 @@ namespace piratechess_lib
                 {
                     List<JsonMoveItemList> innerList = JsonSerializer.Deserialize<List<JsonMoveItemList>>(Val.Value, options: Options.GetOptions())?.ToList() ?? new List<JsonMoveItemList>() ;
 
-                    comment = string.Join(Environment.NewLine, innerList.Select(x => x.CommentAfter) ?? [""]);
+                    // Teile EINES Eintrags (Text, Zugverweis, Text …) sind fortlaufender Text → Leerzeichen,
+                    // kein Zeilenumbruch (sonst stand z. B. „… dass er\n2.d4\nspielen kann" im Kommentar).
+                    comment = string.Join(" ", innerList.Select(x => x.CommentAfter) ?? [""]);
                 }
                 else
                 {
@@ -535,6 +547,10 @@ namespace piratechess_lib
             // siehe @@StartBracket@@ oben).
             comment = comment.Replace('{', '(').Replace('}', ')');
 
+            // Leerraum wie im Chessable-Export: Chessable schreibt Absätze als „ <br/><br/> ", und entfernte
+            // FEN-Marker hinterlassen Leerzeichen am Rand — sonst doppelte Leerzeichen und „Zugfolge }".
+            comment = findWhitespace().Replace(comment, " ").Trim();
+
             return comment;
         }
 
@@ -556,7 +572,7 @@ namespace piratechess_lib
                 {
                     List<string>? innerList = JsonSerializer.Deserialize<List<JsonMoveItemList>>(Val.Value, options: Options.GetOptions())?.Select(x => x.CommentAfter).ToList();
 
-                    comment = string.Join(Environment.NewLine, innerList ?? [""]);
+                    comment = string.Join(" ", innerList ?? [""]);
                 }
                 else
                 {
@@ -727,6 +743,9 @@ namespace piratechess_lib
 
         [GeneratedRegex("<[^>]*>")]
         private static partial Regex findHtmltags();
+
+        [GeneratedRegex(@"\s+")]
+        private static partial Regex findWhitespace();
 
         [GeneratedRegex(@"@@StartFEN@@(.+?)@@EndFEN@@")]
         private static partial Regex findFenTags();
