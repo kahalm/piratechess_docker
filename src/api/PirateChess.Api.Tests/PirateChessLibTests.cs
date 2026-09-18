@@ -248,6 +248,43 @@ public class PirateChessLibTests
         Assert.Null(ex);
     }
 
+    // ---- Solverfarbe im PGN-Kopf -------------------------------------------
+    // Regression (2026-09-18): Chessables Partie-Kurse stellen die Aufgabe oft als „der Gegner hat
+    // gerade 10…Sd4 gespielt, widerlege das" — der erste Zug der Linie gehört dann dem GEGNER. Im
+    // Repertoire-Modus steht kein [%tqu] im PGN; ohne die Solverfarbe konnte rookhub beim Umwandeln
+    // eines Repertoires in einen Kurs nicht wissen, wer am Zug ist, und zeigte die falsche Seite.
+    private const string FenBlackToMove = "r1bqk2r/1ppp1ppp/p1n3n1/3Np2Q/2B1P3/3P4/PPP2PP1/R1B1K2R b KQkq - 0 10";
+
+    private static string TwoMoveLine(string color) =>
+        "{\"game\":{\"initial\":\"" + FenBlackToMove + "\",\"color\":\"" + color + "\",\"isInfo\":0,\"data\":["
+        + "{\"id\":0,\"move\":10,\"col\":\"b\",\"san\":\"Nd4\",\"isKey\":true,\"draws\":[]},"
+        + "{\"id\":1,\"move\":11,\"col\":\"w\",\"san\":\"Bg5\",\"isKey\":true,\"draws\":[]}]}}";
+
+    private static string PgnForLine(string lineJson, bool noTrainingMove)
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":73000253,\"name\":\"L1\"}]}}", lineJson);
+        var lib = new PirateChessLib { restResponseCourse = course, NoTrainingMove = noTrainingMove };
+        return lib.GetCourse("1", useLocalData: true).Item1;
+    }
+
+    [Fact]
+    public void GetCourse_RepertoireMode_WritesSolverColorHeader()
+    {
+        var pgn = PgnForLine(TwoMoveLine("white"), noTrainingMove: true);
+
+        Assert.Contains("[ChessableColor \"white\"]", pgn);
+        Assert.Contains("[ChessableOid \"73000253\"]", pgn);
+        Assert.DoesNotContain("[%tqu", pgn);   // Repertoire-Modus setzt weiterhin keinen Marker
+    }
+
+    [Fact]
+    public void GetCourse_LineWithoutColor_WritesNoColorHeader()
+    {
+        // Kein Farbwert ⇒ kein Header (nichts raten, nichts Fremdes in den Kopf schreiben).
+        Assert.DoesNotContain("[ChessableColor", PgnForLine(TwoMoveLine(""), noTrainingMove: true));
+    }
+
     // ---- Chessable-"V"-Varianten → gültiges PGN ----------------------------
     // Chessables "V"-Daten mischen echte (legale) Seitenlinien mit Transpositions-/Verweis-
     // Notizen (absolute Zugnummern ab Zug 1, Nullzüge "--"). Früher wurden alle blind als

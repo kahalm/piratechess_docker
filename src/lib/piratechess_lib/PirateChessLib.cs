@@ -347,6 +347,17 @@ namespace piratechess_lib
                 var oidTag = (!string.IsNullOrWhiteSpace(oid) && oid.All(char.IsAsciiDigit))
                     ? $"[ChessableOid \"{oid}\"]\n                        " : "";
 
+                // Solverfarbe der Linie als Header. Im Repertoire-Modus ("None") steht KEIN [%tqu] im
+                // PGN — ohne diese Angabe kann die konsumierende Seite (rookhub) nicht wissen, ob der
+                // erste Zug dem Trainierenden oder dem GEGNER gehoert. Bei Chessables Partie-Kursen
+                // gehoert er oft dem Gegner ("10...Nd4, widerlege das"): wird ein solches Repertoire in
+                // einen Kurs umgewandelt, stand ohne den Header die falsche Seite am Zug. Nur die zwei
+                // bekannten Werte durchlassen (keine Header-Injection).
+                var lineColor = game?.Game?.Color ?? "";
+                var colorTag = lineColor.Equals("white", StringComparison.OrdinalIgnoreCase)
+                               || lineColor.Equals("black", StringComparison.OrdinalIgnoreCase)
+                    ? $"[ChessableColor \"{lineColor.ToLowerInvariant()}\"]\n                        " : "";
+
                 _ = (_pgn?.Append($"""
 
                         [Event "{EscapeHeader(pgnHeader.Event)}"]
@@ -355,7 +366,7 @@ namespace piratechess_lib
                         [Black "{EscapeHeader(pgnHeader.Black)}"]
                         [FEN "{EscapeHeader(pgnHeader.FEN)}"]
                         [Result "*"]
-                        {oidTag}
+                        {oidTag}{colorTag}
                         {pgn}
 
 
