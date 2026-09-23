@@ -360,6 +360,50 @@ public class PirateChessLibTests
         Assert.Contains("(1.c4)", pgn);
     }
 
+    // ---- Mehrdeutige Züge in "V" (gemeldet 2026-09-23) ----------------------
+    // Kurs „Lifetime Repertoires: King's Indian Defense - Part 2", Linie „Fianchetto Variation: 7.d5 e6
+    // 8.O-O with 9.Ng5 #6": vor 16.Dxd6 stehen weiße Springer auf c3 UND c5, beide können nach e4. Der
+    // Kommentar dort sagt „16.Ne4 is a better try …" — SanToMove nahm still den ersten passenden
+    // Springer, und ins PGN kam „(16.Ne4 {…})": ein Zug, den kein PGN-Leser spielen kann.
+    private const string KidBefore16 = "r2q2k1/pp2rpb1/2np2pp/2N5/2P5/2NQ2Pb/PP2PP1P/R1BR2K1 w - - 3 16";
+
+    [Fact]
+    public void GetVariationPgn_AmbiguousMove_RenderedAsCommentNotAsMove()
+    {
+        var pgn = PgnForFirstMoveWithV(AfterWithV(KidBefore16,
+            ("S", "16.Ne4"), ("C", "is a better try, although we have full compensation after Bf5.")));
+
+        Assert.DoesNotContain("(16.Ne4", pgn);
+        Assert.Contains("{16.Ne4 is a better try, although we have full compensation after Bf5.}", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_AmbiguousMove_ResolvedByContinuation_WritesDisambiguatedSan()
+    {
+        // 17.Sxb7 geht nur, wenn der Springer auf c5 stehen bleibt → gemeint ist der von c3.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(KidBefore16, ("S", "16.Ne4"), ("S", "Bf5"), ("S", "17.Nxb7")));
+
+        Assert.Contains("(16.N3e4 Bf5 17.Nxb7)", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_AmbiguousMove_BothContinuationsLegal_RenderedAsComment()
+    {
+        // Nach beiden Springerzügen geht 16…Lf5 → die Folge legt nichts fest, also kein Zug.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(KidBefore16, ("S", "16.Ne4"), ("S", "Bf5")));
+
+        Assert.DoesNotContain("(16.", pgn);
+        Assert.Contains("{16.Ne4 Bf5}", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_ExplicitlyDisambiguatedMove_StaysAsWritten()
+    {
+        var pgn = PgnForFirstMoveWithV(AfterWithV(KidBefore16, ("S", "16.N5e4"), ("S", "Bf5")));
+
+        Assert.Contains("(16.N5e4 Bf5)", pgn);
+    }
+
     // ---- softFail (geduldete Züge) → [%alt …] ------------------------------
     [Fact]
     public void GeneratePGN_SoftFail_EmittedAsAltAnnotationMinusMainMove()
