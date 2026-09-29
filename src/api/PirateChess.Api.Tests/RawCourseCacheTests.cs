@@ -238,8 +238,8 @@ public class RawCourseCacheTests
             var stored = JsonSerializer.Deserialize<RestResponseCourse>(GzipText.Decompress(raw.RestResponseJson), opts)!;
             Assert.Equal(4242, stored.ChapterList[0].ResponseLineList[0].Oid);
             Assert.True(string.IsNullOrEmpty(stored.ChapterList[0].ResponseLineList[0].LineJsonContent));
-            // Inhalt liegt im per-Oid-Cache.
-            Assert.True(await db.CachedRawLines.AnyAsync(l => l.Oid == 4242));
+            // Inhalt liegt im per-Oid-Cache, die Zeile gehört zu diesem Kurs.
+            Assert.Equal("bidS", (await db.CachedRawLines.SingleAsync(l => l.Oid == 4242)).Bid);
         }
 
         // GetAsync rekonstruiert den Inhalt aus dem Linien-Cache.
@@ -378,6 +378,7 @@ public class RawCourseCacheTests
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var row = await db.CachedRawLines.SingleAsync(l => l.Oid == 70);
             Assert.Null(row.InvalidAt);
+            Assert.Equal("bidH", row.Bid);
             var archived = await db.CachedRawLineArchive.SingleAsync(a => a.Oid == 70);
             Assert.Equal("{\"game\":{\"data\":[", GzipText.Decompress(archived.LineJsonContent));
         }

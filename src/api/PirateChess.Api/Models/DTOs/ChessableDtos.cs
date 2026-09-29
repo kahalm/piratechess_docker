@@ -43,8 +43,9 @@ public record DirectCourseResponse(string Bid, string Name, string Mode, int Cha
 public record DirectCourseParseRequest(string Bid, string? Mode, List<DirectParseChapter>? Chapters,
     string? CourseJson = null, bool Complete = false);
 public record DirectParseChapter(string? ChapterJson, List<string?>? Lines, List<string>? LineOids = null);
-// Welche Linien (oids) liegen schon im geteilten Rohdaten-Cache — nur die Existenz, nie der Inhalt.
-public record DirectCachedLinesRequest(List<string>? Oids);
+// Welche Linien (oids) liegen schon im geteilten Rohdaten-Cache — nur die Existenz, nie der Inhalt. Bid (optional):
+// nur Linien dieses Kurses (oder Altbestand ohne Kurs) — genau die, mit denen course/parse einen Import füllt.
+public record DirectCachedLinesRequest(List<string>? Oids, string? Bid = null);
 public record DirectCachedLinesResponse(List<string> Oids);
 // Wartung des Linien-Caches: ungültige Linien markieren statt löschen, reparierte wieder freigeben.
 public record DirectInvalidLine(string Oid, string Reason);

@@ -33,6 +33,11 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
     private static string LineJson(string san)
         => "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"col\":\"w\",\"san\":\"" + san + "\"}]}}";
 
+    // Wie eine echte getGame-Antwort: sie nennt selbst ihre oid und ihren Kurs (game.oid, game.bid). Nur solche
+    // Linien dürfen in den geteilten Cache.
+    private static string GameJson(string san, int oid, string bid)
+        => "{\"game\":{\"oid\":" + oid + ",\"bid\":" + bid + ",\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"col\":\"w\",\"san\":\"" + san + "\"}]}}";
+
     private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
 
     [Fact]
@@ -73,11 +78,11 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         return (await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts))!;
     }
 
-    private async Task SeedLineAsync(int oid, string json)
+    private async Task SeedLineAsync(int oid, string json, string? bid = null)
     {
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        db.CachedRawLines.Add(new CachedRawLine { Oid = oid, LineJsonContent = GzipText.Compress(json), CachedAt = DateTime.UtcNow });
+        db.CachedRawLines.Add(new CachedRawLine { Oid = oid, LineJsonContent = GzipText.Compress(json), CachedAt = DateTime.UtcNow, Bid = bid });
         await db.SaveChangesAsync();
     }
 
@@ -129,9 +134,62 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         await ParseOkAsync(new
         {
             Bid = "3300", Mode = "None",
-            Chapters = new[] { Chapter(ChapterJson((3301, "A")), new[] { LineJson("e4") }, new[] { "3301" }) }
+            Chapters = new[] { Chapter(ChapterJson((3301, "A")), new[] { GameJson("e4", 3301, "3300") }, new[] { "3301" }) }
         });
-        Assert.Equal(LineJson("e4"), await CachedLineAsync(3301));
+        Assert.Equal(GameJson("e4", 3301, "3300"), await CachedLineAsync(3301));
+        var row = await CachedRowAsync(3301);
+        Assert.Equal("3300", row!.Bid);          // gehört zu genau diesem Kurs
+        Assert.True(row.FromBrowser);            // vom Client geschickt, nicht bestätigt
+    }
+
+    [Fact]
+    public async Task Parse_LineClaimedUnderAForeignOid_IsUsedForTheImport_ButNotShared()
+    {
+        // A3-002: der Client behauptet oid 5001, die getGame-Antwort selbst nennt oid 99. Vorher landete der Inhalt
+        // unter 5001 im geteilten Cache, und jeder spätere Import dieser Linie hätte ihn übernommen.
+        var body = await ParseOkAsync(new
+        {
+            Bid = "5000", Mode = "None",
+            Chapters = new[] { Chapter(ChapterJson((5001, "A")), new[] { GameJson("e4", 99, "5000") }, new[] { "5001" }) }
+        });
+        Assert.Contains("[ChessableOid \"5001\"]", body.Pgn);   // der Einsender bekommt, was er geschickt hat
+        Assert.Null(await CachedRowAsync(5001));
+    }
+
+    [Fact]
+    public async Task Parse_LineOfAnotherCourse_OrWithoutOwnIds_IsNotShared()
+    {
+        await ParseOkAsync(new
+        {
+            Bid = "5100", Mode = "None",
+            Chapters = new[] { Chapter(ChapterJson((5101, "A"), (5102, "B"), (5103, "C")),
+                new[] { GameJson("e4", 5101, "9999"), LineJson("d4"), GameJson("c4", 5103, "5100") },
+                new[] { "5101", "5102", "5103" }) }
+        });
+        Assert.Null(await CachedRowAsync(5101));      // nennt einen anderen Kurs
+        Assert.Null(await CachedRowAsync(5102));      // nennt weder oid noch Kurs
+        Assert.NotNull(await CachedRowAsync(5103));
+    }
+
+    [Fact]
+    public async Task Parse_FillsOnlyFromLinesOfTheSameCourse_OrLegacyLinesWithoutCourse()
+    {
+        // Begleitteil A3-001: eine oid ohne Inhalt wird nur aus einer Zeile desselben Kurses gefüllt.
+        await SeedLineAsync(5201, LineJson("e4"), bid: "5200");
+        await SeedLineAsync(5202, LineJson("d4"));   // Altbestand ohne bid
+        object Payload(string bid) => new
+        {
+            Bid = bid, Mode = "None",
+            Chapters = new[] { Chapter(ChapterJson((5201, "A"), (5202, "B")), new string?[] { null, null }, new[] { "5201", "5202" }) }
+        };
+
+        var foreign = await ParseOkAsync(Payload("5300"));
+        Assert.DoesNotContain("[ChessableOid \"5201\"]", foreign.Pgn);
+        Assert.Contains("[ChessableOid \"5202\"]", foreign.Pgn);
+
+        var own = await ParseOkAsync(Payload("5200"));
+        Assert.Contains("[ChessableOid \"5201\"]", own.Pgn);
+        Assert.Contains("[ChessableOid \"5202\"]", own.Pgn);
     }
 
     [Fact]
@@ -153,7 +211,7 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         await ParseOkAsync(new
         {
             Bid = "3500", Mode = "None",
-            Chapters = new[] { Chapter(ChapterJson((3501, "A"), (3502, "B")), new[] { "{\"x\":1}", LineJson("e4") }, new[] { "3501", "3502" }) }
+            Chapters = new[] { Chapter(ChapterJson((3501, "A"), (3502, "B")), new[] { "{\"x\":1}", GameJson("e4", 3502, "3500") }, new[] { "3501", "3502" }) }
         });
         Assert.Null(await CachedLineAsync(3501));
         Assert.NotNull(await CachedLineAsync(3502));
@@ -175,7 +233,7 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
     }
 
     [Fact]
-    public async Task Parse_TruncatedCachedLine_IsMarked_NoLongerReportedCached_AndHealedByTheBrowserLine()
+    public async Task Parse_TruncatedCachedLine_IsMarked_NoLongerReportedCached_AndNotHealedByBrowserContent()
     {
         // Regression 2026-09-15 (Kurs 207313, oid 36114125): die Linie lag seit Juni abgeschnitten im Cache. Die
         // Extension hielt sie für gecacht, schickte nur die oid, und der Parser übersprang sie — bei jedem Import, still.
@@ -195,18 +253,21 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         Assert.Equal(truncated, GzipText.Decompress(marked.LineJsonContent));   // markiert, nicht gelöscht
         Assert.DoesNotContain("3951", await CachedOidsAsync("3951"));           // → die Extension holt sie selbst
 
+        // A3-002: eine markierte Linie ersetzt nur ein eigener Server-Abruf, nie der Inhalt eines Clients — sonst
+        // könnte jeder eine markierte Linie mit erfundenem Inhalt für alle „heilen".
         var second = await ParseOkAsync(new
         {
             Bid = "3950", Mode = "None",
-            Chapters = new[] { Chapter(ChapterJson((3951, "Dubov Italian")), new[] { LineJson("e4") }, new[] { "3951" }) }
+            Chapters = new[] { Chapter(ChapterJson((3951, "Dubov Italian")), new[] { GameJson("e4", 3951, "3950") }, new[] { "3951" }) }
         });
-        Assert.Contains("[ChessableOid \"3951\"]", second.Pgn);
-        Assert.Equal(LineJson("e4"), await CachedLineAsync(3951));               // geheilt
-        Assert.Contains("3951", await CachedOidsAsync("3951"));
+        Assert.Contains("[ChessableOid \"3951\"]", second.Pgn);                // der Einsender bekommt seine Linie
+        var stillMarked = await CachedRowAsync(3951);
+        Assert.NotNull(stillMarked!.InvalidAt);
+        Assert.Equal(truncated, GzipText.Decompress(stillMarked.LineJsonContent));
+        Assert.DoesNotContain("3951", await CachedOidsAsync("3951"));
 
         using var scope = _factory.Services.CreateScope();
-        var archived = scope.ServiceProvider.GetRequiredService<AppDbContext>().CachedRawLineArchive.Single(a => a.Oid == 3951);
-        Assert.Equal(truncated, GzipText.Decompress(archived.LineJsonContent));
+        Assert.False(scope.ServiceProvider.GetRequiredService<AppDbContext>().CachedRawLineArchive.Any(a => a.Oid == 3951));
     }
 
     [Fact]
@@ -243,9 +304,36 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         await ParseOkAsync(new
         {
             Bid = "3600", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
-            Chapters = new[] { Chapter(ChapterJson((3601, "A"), (3602, "B")), new[] { LineJson("e4"), LineJson("d4") }, new[] { "3601", "3602" }) }
+            Chapters = new[] { Chapter(ChapterJson((3601, "A"), (3602, "B")), new[] { GameJson("e4", 3601, "3600"), GameJson("d4", 3602, "3600") }, new[] { "3601", "3602" }) }
         });
         Assert.True(await CourseCachedAsync("3600"));
+    }
+
+    [Fact]
+    public async Task Parse_CompleteButLinesNotSharable_WritesNoCourseCache()
+    {
+        // A3-002: EIN Kapitel, Complete und ein courseJson mit einem Kapitel erfüllten die Kapitelzahl-Prüfung —
+        // der ganze Kurs-Cache dieses bids entstand aus Client-Inhalt, den kein Linien-Check gesehen hatte.
+        await ParseOkAsync(new
+        {
+            Bid = "5400", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
+            Chapters = new[] { Chapter(ChapterJson((5401, "A"), (5402, "B")), new[] { LineJson("e4"), GameJson("d4", 5402, "5400") }, new[] { "5401", "5402" }) }
+        });
+        Assert.False(await CourseCachedAsync("5400"));
+        Assert.Null(await CachedRowAsync(5401));
+    }
+
+    [Fact]
+    public async Task Parse_CompleteButALineBelongsToAnotherCourse_WritesNoCourseCache()
+    {
+        await SeedLineAsync(5501, LineJson("c4"), bid: "7777");
+        await ParseOkAsync(new
+        {
+            Bid = "5500", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
+            Chapters = new[] { Chapter(ChapterJson((5501, "A"), (5502, "B")), new[] { GameJson("e4", 5501, "5500"), GameJson("d4", 5502, "5500") }, new[] { "5501", "5502" }) }
+        });
+        Assert.False(await CourseCachedAsync("5500"));
+        Assert.Equal("7777", (await CachedRowAsync(5501))!.Bid);   // vorhandene Zeile unberührt
     }
 
     [Fact]
@@ -254,7 +342,7 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         await ParseOkAsync(new
         {
             Bid = "3700", Mode = "None", CourseJson = OneChapterCourse, Complete = false,
-            Chapters = new[] { Chapter(ChapterJson((3701, "A"), (3702, "B")), new[] { LineJson("e4"), LineJson("d4") }, new[] { "3701", "3702" }) }
+            Chapters = new[] { Chapter(ChapterJson((3701, "A"), (3702, "B")), new[] { GameJson("e4", 3701, "3700"), GameJson("d4", 3702, "3700") }, new[] { "3701", "3702" }) }
         });
         Assert.False(await CourseCachedAsync("3700"));
     }
@@ -265,7 +353,7 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         await ParseOkAsync(new
         {
             Bid = "3800", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
-            Chapters = new[] { Chapter(ChapterJson((3801, "A"), (3802, "B")), new[] { LineJson("e4"), null }, new[] { "3801", "3802" }) }
+            Chapters = new[] { Chapter(ChapterJson((3801, "A"), (3802, "B")), new[] { GameJson("e4", 3801, "3800"), null }, new[] { "3801", "3802" }) }
         });
         Assert.False(await CourseCachedAsync("3800"));
     }
@@ -276,7 +364,7 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         await ParseOkAsync(new
         {
             Bid = "3900", Mode = "None", CourseJson = "{\"course\":{\"data\":[{\"id\":1},{\"id\":2}]}}", Complete = true,
-            Chapters = new[] { Chapter(ChapterJson((3901, "A"), (3902, "B")), new[] { LineJson("e4"), LineJson("d4") }, new[] { "3901", "3902" }) }
+            Chapters = new[] { Chapter(ChapterJson((3901, "A"), (3902, "B")), new[] { GameJson("e4", 3901, "3900"), GameJson("d4", 3902, "3900") }, new[] { "3901", "3902" }) }
         });
         Assert.False(await CourseCachedAsync("3900"));
     }
@@ -308,6 +396,28 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<CachedLinesResp>(JsonOpts);
         Assert.Equal(new[] { "4201" }, body!.Oids);
+    }
+
+    [Fact]
+    public async Task LinesCached_WithBid_ReportsOnlyLinesThatFillThisCourse()
+    {
+        await SeedLineAsync(5601, LineJson("e4"), bid: "5600");
+        await SeedLineAsync(5602, LineJson("d4"), bid: "5700");
+        await SeedLineAsync(5603, LineJson("c4"));   // Altbestand ohne bid
+        var oids = new[] { "5601", "5602", "5603" };
+
+        var scoped = await Client().PostAsJsonAsync("/api/chessable/direct/lines/cached", new { Oids = oids, Bid = "5600" });
+        Assert.Equal(HttpStatusCode.OK, scoped.StatusCode);
+        Assert.Equal(new[] { "5601", "5603" }, (await scoped.Content.ReadFromJsonAsync<CachedLinesResp>(JsonOpts))!.Oids.Order());
+
+        Assert.Equal(oids, (await CachedOidsAsync(oids)).Order());   // ohne Bid wie bisher
+    }
+
+    [Fact]
+    public async Task LinesCached_InvalidBid_Returns400()
+    {
+        var response = await Client().PostAsJsonAsync("/api/chessable/direct/lines/cached", new { Oids = new[] { "1" }, Bid = "12x" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]

@@ -52,6 +52,31 @@ public class BrowserCourseAssemblerTests
     public void IsCacheableLine(string content, bool expected)
         => Assert.Equal(expected, BrowserCourseAssembler.IsCacheableLine(content));
 
+    [Theory]
+    [InlineData("{\"game\":{\"oid\":5,\"bid\":77,\"data\":[]}}", true)]
+    [InlineData("{\"game\":{\"oid\":\"5\",\"bid\":\"77\"}}", true)]
+    [InlineData("{\"Game\":{\"Oid\":5,\"Bid\":77}}", true)]
+    [InlineData("{\"game\":{\"oid\":6,\"bid\":77}}", false)]
+    [InlineData("{\"game\":{\"oid\":5,\"bid\":78}}", false)]
+    [InlineData("{\"game\":{\"bid\":77}}", false)]
+    [InlineData("{\"game\":{\"oid\":5}}", false)]
+    [InlineData("{\"oid\":5,\"bid\":77}", false)]
+    [InlineData("{\"game\":{\"oid\":5,\"bid\":77", false)]
+    public void CarriesOwnIds_ComparesGameOidAndBid(string content, bool expected)
+        => Assert.Equal(expected, BrowserCourseAssembler.CarriesOwnIds(content, 5, "77"));
+
+    [Fact]
+    public void SharableLines_KeepsOnlyLinesNamingTheirOwnOidAndCourse()
+    {
+        var provided = new Dictionary<int, string>
+        {
+            [5] = "{\"game\":{\"oid\":5,\"bid\":77}}",
+            [6] = "{\"game\":{\"oid\":5,\"bid\":77}}",   // Inhalt einer anderen Linie unter oid 6
+            [7] = Line,                                    // ohne eigene Angaben
+        };
+        Assert.Equal(new[] { 5 }, BrowserCourseAssembler.SharableLines(provided, "77").Keys);
+    }
+
     [Fact]
     public void CourseChapterCount_ReadsCourseData_OrNull()
     {

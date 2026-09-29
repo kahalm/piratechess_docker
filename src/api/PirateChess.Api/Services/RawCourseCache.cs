@@ -351,7 +351,7 @@ public class RawCourseCache
             // Linieninhalte in den per-Oid-Cache spiegeln (idempotent), dann nur die Struktur (Kapitel
             // + Linien-Oids) speichern — die Inhalte liegen pro Oid in CachedRawLines und werden beim
             // Lesen rekonstruiert. Spart den Großteil der Größe (Linien = ~95 %).
-            await SeedLinesAsync(db, course, ct);
+            await SeedLinesAsync(db, course, bid, ct);
             var compressed = GzipText.Compress(JsonSerializer.Serialize(ToStructure(course)));
             // Selbst komprimiert sprengen einzelne Riesen-Kurse MariaDBs max_allowed_packet (Prod/Dev
             // 256 MB). Solche Einträge lassen sich nicht persistent cachen → sauber überspringen, statt
@@ -406,8 +406,9 @@ public class RawCourseCache
     /// Linie beim Fetch nicht im Cache landete). Es gelten die Regeln des Linien-Caches
     /// (<see cref="RawLineCache"/>): leere Linien werden nicht abgelegt, eine ungültige nur markiert, ein
     /// gültiger Eintrag nie überschrieben; eine markierte Zeile ersetzt nur gültiger Inhalt (alter ins Archiv).
+    /// Neue und ersetzte Zeilen gehören danach zu diesem Kurs (<paramref name="bid"/>).
     /// </summary>
-    private static async Task SeedLinesAsync(AppDbContext db, RestResponseCourse course, CancellationToken ct)
+    private static async Task SeedLinesAsync(AppDbContext db, RestResponseCourse course, string bid, CancellationToken ct)
     {
         var lines = course.ChapterList
             .SelectMany(ch => ch.ResponseLineList)
@@ -434,7 +435,10 @@ public class RawCourseCache
             if (marked.TryGetValue(l.Oid, out var id))
             {
                 if (reason is not null) continue;   // ungültig ersetzt nie einen vorhandenen Stand
-                RawLineCache.Heal(db, await db.CachedRawLines.FirstAsync(c => c.Id == id, ct), GzipText.Compress(l.LineJsonContent!), now);
+                var row = await db.CachedRawLines.FirstAsync(c => c.Id == id, ct);
+                RawLineCache.Heal(db, row, GzipText.Compress(l.LineJsonContent!), now);
+                row.Bid = bid;
+                row.FromBrowser = false;
             }
             else
             {
@@ -443,6 +447,7 @@ public class RawCourseCache
                     Oid = l.Oid,
                     LineJsonContent = GzipText.Compress(l.LineJsonContent!),
                     CachedAt = now,
+                    Bid = bid,
                     InvalidAt = reason is null ? null : now,
                     InvalidReason = reason,
                 });

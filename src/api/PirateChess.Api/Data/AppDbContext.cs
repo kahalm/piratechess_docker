@@ -30,6 +30,7 @@ public class AppDbContext : DbContext
             e.HasIndex(c => c.Oid).IsUnique();
             e.Property(c => c.LineJsonContent).HasColumnType("LONGTEXT");
             e.Property(c => c.InvalidReason).HasMaxLength(200);
+            e.Property(c => c.Bid).HasMaxLength(12);
         });
 
         modelBuilder.Entity<CachedRawLineArchive>(e =>

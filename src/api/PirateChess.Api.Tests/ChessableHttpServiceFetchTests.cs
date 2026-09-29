@@ -103,6 +103,10 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         Assert.Equal(new[] { 11, 12 }, data.ChapterList[0].ResponseLineList.Select(l => l.Oid));
         Assert.Equal(ValidLine, data.ChapterList[1].ResponseLineList[0].LineJsonContent);
         Assert.True(await LineCachedAsync(21));
+        using var scope = _scopeFactory.CreateScope();
+        var row = await scope.ServiceProvider.GetRequiredService<AppDbContext>().CachedRawLines.SingleAsync(l => l.Oid == 21);
+        Assert.Equal("777", row.Bid);            // Linie gehört zu dem Kurs, für den der Server sie geholt hat
+        Assert.False(row.FromBrowser);
     }
 
     // Token läuft mitten im Import ab: getList liefert den Fehlerkörper. Vorher: leeres Kapitel, Erfolg.

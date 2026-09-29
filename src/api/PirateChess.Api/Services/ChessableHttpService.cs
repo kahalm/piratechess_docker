@@ -579,7 +579,7 @@ public class ChessableHttpService : IChessableHttpService
                 // die Linie wird nach erfolgreichem Abruf per Upsert ersetzt. Bewusst UMGEHEN statt
                 // vorher löschen: scheitert der Abruf (Block, totes Bearer), bleibt der alte,
                 // funktionierende Stand erhalten statt unwiederbringlich weg zu sein.
-                string? lineContent = bypassLineCache ? null : await _lineCache.GetAsync(line.Id, ct);
+                string? lineContent = bypassLineCache ? null : await _lineCache.GetAsync(line.Id, bid, ct);
                 bool fromCache = lineContent is not null;
 
                 if (!fromCache)
@@ -635,7 +635,7 @@ public class ChessableHttpService : IChessableHttpService
 
                     // Nur vollständig parsbare Linien cachen → kein vergifteter Resume-Cache.
                     if (LineParses(lineContent))
-                        await _lineCache.SetAsync(line.Id, lineContent, ct);
+                        await _lineCache.SetAsync(line.Id, lineContent, bid, ct);
                 }
 
                 lineSlots[lineIdx] = new RestResponseLine { Oid = line.Id, LineJsonContent = lineContent ?? "" };

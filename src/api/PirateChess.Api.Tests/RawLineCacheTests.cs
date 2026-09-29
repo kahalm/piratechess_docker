@@ -38,14 +38,15 @@ public class RawLineCacheTests
         return await scope.ServiceProvider.GetRequiredService<AppDbContext>().CachedRawLineArchive.AsNoTracking().Where(a => a.Oid == oid).ToListAsync();
     }
 
-    private static async Task SeedAsync(IServiceProvider sp, int oid, string json, DateTime? invalidAt = null, string? reason = null)
+    private static async Task SeedAsync(IServiceProvider sp, int oid, string json, DateTime? invalidAt = null, string? reason = null,
+        string? bid = null, bool fromBrowser = false)
     {
         using var scope = sp.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         db.CachedRawLines.Add(new CachedRawLine
         {
             Oid = oid, LineJsonContent = GzipText.Compress(json), CachedAt = new DateTime(2026, 6, 14, 18, 35, 34, DateTimeKind.Utc),
-            InvalidAt = invalidAt, InvalidReason = reason,
+            InvalidAt = invalidAt, InvalidReason = reason, Bid = bid, FromBrowser = fromBrowser,
         });
         await db.SaveChangesAsync();
     }
@@ -192,8 +193,10 @@ public class RawLineCacheTests
     }
 
     [Fact]
-    public async Task AddMissing_HealsAMarkedLine_ButNeverTouchesAValidOne()
+    public async Task AddMissing_TouchesNeitherAMarkedNorAValidLine_NewOnesGetCourseAndBrowserOrigin()
     {
+        // A3-002: Browser-Inhalt kommt vom Client und ist nicht bestätigt. Er darf eine markierte Linie nicht „heilen"
+        // (sonst ersetzt jeder sie für alle durch erfundenen Inhalt) — das tut nur ein eigener Server-Abruf.
         var (cache, sp) = BuildCache();
         await SeedAsync(sp, 36114125, Truncated, DateTime.UtcNow, "JSON: abgeschnitten");
         await SeedAsync(sp, 2, Line("c4"));
@@ -203,14 +206,51 @@ public class RawLineCacheTests
             [36114125] = Line("e4"),
             [2] = Line("g3"),
             [4] = Line("b3"),
-        });
+        }, "900");
 
-        Assert.Equal(2, added);   // geheilt + neu, die gültige 2 bleibt
-        Assert.Equal(Line("e4"), await cache.GetAsync(36114125));
+        Assert.Equal(1, added);   // nur die neue 4
+        var marked = await RowAsync(sp, 36114125);
+        Assert.NotNull(marked!.InvalidAt);
+        Assert.Equal(Truncated, GzipText.Decompress(marked.LineJsonContent));
+        Assert.Null(await cache.GetAsync(36114125));
+        Assert.Empty(await ArchiveAsync(sp, 36114125));
         Assert.Equal(Line("c4"), await cache.GetAsync(2));
-        Assert.Equal(Line("b3"), await cache.GetAsync(4));
-        Assert.Single(await ArchiveAsync(sp, 36114125));
-        Assert.Empty(await ArchiveAsync(sp, 2));
+        var added4 = await RowAsync(sp, 4);
+        Assert.Equal(Line("b3"), GzipText.Decompress(added4!.LineJsonContent));
+        Assert.Equal("900", added4.Bid);
+        Assert.True(added4.FromBrowser);
+    }
+
+    [Fact]
+    public async Task Reads_WithBid_SkipLinesOfAnotherCourse_LegacyLinesStillCount()
+    {
+        // Begleitteil A3-001: eine Linie füllt nur einen Import ihres eigenen Kurses; Altbestand ohne bid weiter jeden.
+        var (cache, sp) = BuildCache();
+        await SeedAsync(sp, 1, Line("e4"), bid: "10");
+        await SeedAsync(sp, 2, Line("d4"));
+        await SeedAsync(sp, 3, Line("c4"), bid: "20");
+
+        Assert.Equal(new[] { 1, 2 }, (await cache.GetManyAsync([1, 2, 3], "10")).Keys.Order());
+        Assert.Equal(new[] { 1, 2 }, (await cache.GetCachedOidsAsync([1, 2, 3], "10")).Order());
+        Assert.Null(await cache.GetAsync(3, "10"));
+        Assert.Equal(Line("c4"), await cache.GetAsync(3, "20"));
+        Assert.Equal(new[] { 1, 2, 3 }, (await cache.GetManyAsync([1, 2, 3])).Keys.Order());   // ohne bid wie bisher
+    }
+
+    [Fact]
+    public async Task Set_FromTheServer_TakesOverTheCourse_AndClearsBrowserOrigin()
+    {
+        var (cache, sp) = BuildCache();
+        await SeedAsync(sp, 5, Line("e4"), bid: "30", fromBrowser: true);
+
+        await cache.SetAsync(5, Line("d4"), "40");
+        await cache.SetAsync(6, Line("c4"), "40");
+
+        var replaced = await RowAsync(sp, 5);
+        Assert.Equal("40", replaced!.Bid);
+        Assert.False(replaced.FromBrowser);
+        Assert.Equal("40", (await RowAsync(sp, 6))!.Bid);
+        Assert.False((await RowAsync(sp, 6))!.FromBrowser);
     }
 
     [Fact]

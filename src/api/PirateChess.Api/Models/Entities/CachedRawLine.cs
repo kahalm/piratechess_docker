@@ -22,4 +22,16 @@ public class CachedRawLine
 
     /// <summary>Warum die Linie markiert wurde (z. B. die JSON-Fehlermeldung), höchstens 200 Zeichen.</summary>
     public string? InvalidReason { get; set; }
+
+    /// <summary>
+    /// Kurs (Chessable-bid), unter dem die Linie abgelegt wurde. Einen Import füllt die Linie nur für genau diesen
+    /// Kurs; <c>null</c> = Altbestand von vor der Spalte, der weiter jeden Kurs füllt.
+    /// </summary>
+    public string? Bid { get; set; }
+
+    /// <summary>
+    /// Der Inhalt kam aus einem Browser-Upload (vom Client geschickt, nicht bestätigt), nicht aus einem eigenen
+    /// Server-Abruf. Ein späterer Server-Abruf derselben Linie setzt das zurück.
+    /// </summary>
+    public bool FromBrowser { get; set; }
 }

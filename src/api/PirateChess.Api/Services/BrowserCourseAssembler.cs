@@ -76,6 +76,28 @@ public static class BrowserCourseAssembler
     }
 
     /// <summary>
+    /// Die mitgeschickten Linien, die in den GETEILTEN Cache dürfen: nur solche, deren getGame-Antwort selbst
+    /// dieselbe oid (<c>game.oid</c>) und denselben Kurs (<c>game.bid</c>) nennt, wie der Client behauptet. Eine
+    /// Linie, die unter fremder oid oder für einen anderen Kurs eingereicht wird, oder eine ohne diese Angaben, wird
+    /// nur für den Import des Einsenders verwendet, nicht für alle abgelegt.
+    /// </summary>
+    public static Dictionary<int, string> SharableLines(IReadOnlyDictionary<int, string> provided, string bid)
+        => provided.Where(kv => CarriesOwnIds(kv.Value, kv.Key, bid)).ToDictionary(kv => kv.Key, kv => kv.Value);
+
+    /// <summary>Nennt die getGame-Antwort selbst genau diese oid und diesen Kurs (<c>game.oid</c>, <c>game.bid</c>)?</summary>
+    public static bool CarriesOwnIds(string? content, int oid, string bid)
+    {
+        if (!long.TryParse(bid, NumberStyles.None, CultureInfo.InvariantCulture, out var expectedBid)) return false;
+        try
+        {
+            if (JsonNode.Parse(content ?? string.Empty) is not JsonObject root || Property(root, "game") is not JsonObject game)
+                return false;
+            return ReadNumber(Property(game, "oid")) == oid && ReadNumber(Property(game, "bid")) == expectedBid;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    /// <summary>
     /// Ordnet die Linien eines Kapitels über ihre oid der Reihenfolge von <c>list.data</c> zu. Vorrang hat
     /// die mitgeschickte Linie, sonst die gecachte; Einträge ohne beides fallen aus <c>list.data</c> heraus.
     /// Fehlt nichts, bleibt das Kapitel-JSON Byte für Byte erhalten.
@@ -168,6 +190,16 @@ public static class BrowserCourseAssembler
 
     private static JsonNode? Property(JsonObject obj, string name)
         => obj.FirstOrDefault(kv => string.Equals(kv.Key, name, StringComparison.OrdinalIgnoreCase)).Value;
+
+    /// <summary>Zahl (auch als Ziffern-String) aus einem JSON-Wert, sonst <c>null</c>.</summary>
+    private static long? ReadNumber(JsonNode? node)
+    {
+        if (node is not JsonValue value) return null;
+        if (value.TryGetValue<long>(out var l)) return l;
+        if (value.TryGetValue<string>(out var s) && long.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+            return parsed;
+        return null;
+    }
 
     private static int? ReadId(JsonNode? entry)
     {
