@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -19,7 +20,7 @@ public class DirectLimitsTests
 
     /// <summary>Factory mit Mini-Fenster (2 Requests, Fenster läuft während des Tests nicht ab) —
     /// nur so lässt sich das 429-Verhalten deterministisch auslösen.</summary>
-    private sealed class TinyRateLimitFactory : TestWebApplicationFactory
+    private sealed class TinyRateLimitFactory(int invalidKeyPermitLimit = 30) : TestWebApplicationFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -30,8 +31,20 @@ public class DirectLimitsTests
                 {
                     ["RateLimit:Direct:PermitLimit"] = "2",
                     ["RateLimit:Direct:WindowSeconds"] = "3600",
+                    ["RateLimit:Direct:InvalidKeyPermitLimit"] = invalidKeyPermitLimit.ToString(),
                 });
             });
+        }
+    }
+
+    /// <summary>Factory ohne konfigurierten Service-Key.</summary>
+    private sealed class NoServiceKeyFactory : TestWebApplicationFactory
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureAppConfiguration((_, config) =>
+                config.AddInMemoryCollection(new Dictionary<string, string?> { ["Service:ApiKey"] = "" }));
         }
     }
 
@@ -49,6 +62,57 @@ public class DirectLimitsTests
         Assert.Equal(HttpStatusCode.OK, r1.StatusCode);
         Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, r3.StatusCode); // Fenster voll → 429, nicht 503
+    }
+
+    [Fact]
+    public async Task CallsWithoutValidKey_DoNotEmptyTheServiceKeyWindow()
+    {
+        // S2-005: vorher EIN Fenster für alle direct-Aufrufer — Aufrufe ohne Key verbrauchten die Permits, rookhubs
+        // echte Aufrufe (Poll, course/parse) bekamen 429 und der Import scheiterte.
+        using var factory = new TinyRateLimitFactory();
+        var anonymous = factory.CreateClient();
+        for (var i = 0; i < 3; i++)
+            Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/chessable/direct/build-info")).StatusCode);
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add(ServiceKeyHeader, ValidServiceKey);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/chessable/direct/build-info")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/chessable/direct/build-info")).StatusCode);
+    }
+
+    [Fact]
+    public async Task CallsWithWrongKey_HaveTheirOwnSmallWindow()
+    {
+        using var factory = new TinyRateLimitFactory(invalidKeyPermitLimit: 1);
+        var wrong = factory.CreateClient();
+        wrong.DefaultRequestHeaders.Add(ServiceKeyHeader, "nope");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/chessable/direct/build-info")).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await wrong.GetAsync("/api/chessable/direct/build-info")).StatusCode);
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add(ServiceKeyHeader, ValidServiceKey);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/chessable/direct/build-info")).StatusCode);
+    }
+
+    [Fact]
+    public async Task ParseCourse_WithoutKey_Returns401_BeforeTheBodyIsBound()
+    {
+        // S2-005: die Key-Prüfung lief als Action-Filter NACH Modellbindung und der ModelState-Prüfung von
+        // [ApiController] — ein kaputter Body ohne Key bekam 400 samt Feldnamen, ein großer wurde erst ganz gelesen und
+        // deserialisiert (course/parse nimmt bis 100 MB an).
+        using var factory = new TestWebApplicationFactory();
+        var response = await factory.CreateClient().PostAsync("/api/chessable/direct/course/parse",
+            new StringContent("{\"bid\": [", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ServiceKeyNotConfigured_Returns503()
+    {
+        using var factory = new NoServiceKeyFactory();
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add(ServiceKeyHeader, ValidServiceKey);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await client.GetAsync("/api/chessable/direct/build-info")).StatusCode);
     }
 
     [Fact]

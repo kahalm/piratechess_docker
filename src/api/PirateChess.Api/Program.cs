@@ -1,9 +1,11 @@
 using System.Security.Claims;
 using System.Text;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using PirateChess.Api.Authorization;
 using PirateChess.Api.BackgroundJobs;
 using PirateChess.Api.Data;
 using PirateChess.Api.Hubs;
@@ -168,19 +170,30 @@ builder.Services.AddHostedService<RawResponseRetentionService>();
 builder.Services.AddSignalR();
 
 // Rate-Limiter für /api/chessable/direct/* (benannte Policy "direct", per [EnableRateLimiting] am
-// Controller). EIN gemeinsames Fixed-Window für alle direct-Aufrufer: schützt vor Amok-Schleifen/
+// Controller). Ein Fixed-Window für alle Aufrufer MIT gültigem Service-Key (rookhub): schützt vor Amok-Schleifen/
 // Missbrauch, ohne legitimen Betrieb zu bremsen — rookhub pollt Fortschritt alle 2,5 s (~24 Requests/min
-// je Import-Job), der Default (300/min) lässt also reichlich Luft. Die langlaufenden Fetch-Jobs selbst
-// laufen im Hintergrund weiter; der Limiter gate't nur die Request-ANNAHME, bricht also nichts ab.
+// je Import-Job), der Default (300/min) lässt also reichlich Luft. Aufrufer ohne/mit falschem Key landen in
+// einem EIGENEN, kleinen Fenster (Default 30/min): sie bekommen ohnehin nur 401/503, dürfen aber das Fenster,
+// von dem rookhubs Importe leben, nicht leeren. Die langlaufenden Fetch-Jobs selbst laufen im Hintergrund
+// weiter; der Limiter gate't nur die Request-ANNAHME, bricht also nichts ab.
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests; // statt Default 503
-    options.AddFixedWindowLimiter("direct", o =>
+    options.AddPolicy("direct", http =>
     {
-        // Lambda läuft erst beim Aufbau der Middleware → sieht auch Test-Config (WebApplicationFactory).
-        o.PermitLimit = builder.Configuration.GetValue("RateLimit:Direct:PermitLimit", 300);
-        o.Window = TimeSpan.FromSeconds(builder.Configuration.GetValue("RateLimit:Direct:WindowSeconds", 60));
-        o.QueueLimit = 0; // kein Anstellen: über dem Limit sofort 429 (Aufrufer sollen backoffen)
+        // Die Fenster-Fabriken laufen erst beim ersten Request je Partition → sehen auch Test-Config
+        // (WebApplicationFactory). QueueLimit 0: kein Anstellen, über dem Limit sofort 429 (Aufrufer sollen backoffen).
+        var config = http.RequestServices.GetRequiredService<IConfiguration>();
+        var window = TimeSpan.FromSeconds(config.GetValue("RateLimit:Direct:WindowSeconds", 60));
+        return ServiceKeyAuthAttribute.Check(http) == ServiceKeyAuthAttribute.KeyState.Valid
+            ? RateLimitPartition.GetFixedWindowLimiter("service-key", _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = config.GetValue("RateLimit:Direct:PermitLimit", 300), Window = window, QueueLimit = 0,
+            })
+            : RateLimitPartition.GetFixedWindowLimiter("no-service-key", _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = config.GetValue("RateLimit:Direct:InvalidKeyPermitLimit", 30), Window = window, QueueLimit = 0,
+            });
     });
 });
 
