@@ -20,6 +20,9 @@ public class ChessableHttpService : IChessableHttpService
     // nicht mehr aus einem festen Feld.
     private readonly RawLineCache _lineCache;
     private readonly string _curlPath;
+
+    /// <summary>Pfad der curl-Binary. Nur Tests setzen ihn (Fake-curl, das Chessable-Antworten ausspielt).</summary>
+    internal string CurlPath { get => _curlPath; init => _curlPath = value; }
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     // Der Kurs-Struktur-Abruf hatte bisher keinen Retry. Direkt nach einer VPN-
@@ -27,7 +30,7 @@ public class ChessableHttpService : IChessableHttpService
     // einziges 503 ließ den ganzen Import scheitern. Daher bounded Retry mit Pause,
     // bis der Tunnel wieder steht.
     private const int CourseFetchAttempts = 4;
-    private const int ProxyRetryDelayMs = 4000;
+    internal int ProxyRetryDelayMs { get; init; } = 4000;   // Tests setzen ihn auf 0
 
     // curl bricht die (Proxy-)CONNECT-Phase nach so vielen Sekunden ab, statt im Default bis ~300 s
     // zu hängen. Bei soft-geblockter/hängender VPN-IP fror ein Request sonst den Import minutenlang
@@ -357,8 +360,13 @@ public class ChessableHttpService : IChessableHttpService
 
     /// <summary>Erkennt einen Chessable-Fehler-Body (z. B. <c>{"error":{"message":"Expired token"}}</c>
     /// oder <c>{"error":"…"}</c>) und liefert eine sprechende Meldung; sonst <c>null</c>.</summary>
-    public static string? TryGetChessableErrorMessage(string content)
+    public static string? TryGetChessableErrorMessage(string content) => TryGetChessableErrorMessage(content, out _);
+
+    /// <summary>Wie <see cref="TryGetChessableErrorMessage(string)"/>; <paramref name="tokenError"/> sagt, ob die
+    /// Meldung das Token betrifft („Expired token"/„Invalid token") — dann hilft kein Retry.</summary>
+    internal static string? TryGetChessableErrorMessage(string content, out bool tokenError)
     {
+        tokenError = false;
         try
         {
             using var doc = JsonDocument.Parse(content);
@@ -377,7 +385,8 @@ public class ChessableHttpService : IChessableHttpService
             };
             if (string.IsNullOrWhiteSpace(message)) return null;
             // „Expired token" / „Invalid token" → eindeutiger Hinweis auf einen neuen Bearer.
-            return message.Contains("token", StringComparison.OrdinalIgnoreCase)
+            tokenError = message.Contains("token", StringComparison.OrdinalIgnoreCase);
+            return tokenError
                 ? $"Chessable-Token abgelaufen/ungültig ({message}) — bitte den Bearer neu hinterlegen."
                 : $"Chessable: {message}";
         }
@@ -493,10 +502,12 @@ public class ChessableHttpService : IChessableHttpService
             var chapter = course.Course.Data[chapterIdx];
             onChapterProgress?.Invoke($"{chapterIdx + 1} / {course.Course.Data.Count}");
 
-            // Kapitel-Struktur (getList) mit Validierung + Retry holen: nur ein vollständig als
-            // ResponseChapter parsbarer Body wird akzeptiert. Ein leerer/abgeschnittener Body wird
-            // im selben Lauf erneut vom Server geholt, statt ihn truncated weiterzuverarbeiten und
-            // zu cachen (sonst Kurs lückenhaft bzw. Crash beim Replay).
+            // Kapitel-Struktur (getList) mit Validierung + Retry holen: nur ein Body, der die gemeinsame
+            // Prüfregel besteht (ChessableContent.ChapterReason), wird akzeptiert. Ein leerer/abgeschnittener
+            // Body wird im selben Lauf erneut vom Server geholt, statt ihn truncated weiterzuverarbeiten und
+            // zu cachen (sonst Kurs lückenhaft bzw. Crash beim Replay). Ein Chessable-Fehlerkörper (HTTP 200)
+            // ist ein Fehlversuch; betrifft er das Token, bricht der Abruf sofort ab, sonst nach dem letzten
+            // Versuch — nie wird er als Kapitel ohne Linien weitergereicht.
             var chapterUrl = $"https://www.chessable.com/api/v1/getList?uid={uid}&bid={bid}&lid={chapter.Id}";
             string chapterContent = "";
             ResponseChapter? responseChapter = null;
@@ -517,6 +528,10 @@ public class ChessableHttpService : IChessableHttpService
                 if (responseChapter is not null)
                     break; // vollständig geparst → ok
 
+                var chapterApiError = TryGetChessableErrorMessage(chapterContent ?? "", out var chapterTokenError);
+                if (chapterTokenError)
+                    return AbortFetch(bid, chapterApiError!);
+
                 if (attempt < ChapterFetchAttempts - 1)
                 {
                     _logger.LogWarning(
@@ -527,6 +542,8 @@ public class ChessableHttpService : IChessableHttpService
                 }
                 else
                 {
+                    if (chapterApiError is not null)
+                        return AbortFetch(bid, $"{chapterApiError} (Kapitel {chapter.Id}, nach {ChapterFetchAttempts} Versuchen)");
                     _logger.LogWarning(
                         "Chapter {ChapterId} still empty/truncated after {Total} attempts — skipping (course won't be cached)",
                         chapter.Id, ChapterFetchAttempts);
@@ -546,9 +563,13 @@ public class ChessableHttpService : IChessableHttpService
             var lines = responseChapter.List.Data;
             var lineSlots = new RestResponseLine[lines.Count];
             int chapterDone = 0;
+            // Erster Grund, den ganzen Abruf abzubrechen (Chessable-Fehlerkörper bei einer Linie). Parallele
+            // Linien sehen ihn und hören auf; das Kapitel wird danach nicht weiterverarbeitet.
+            string? abortError = null;
 
             async Task FetchLineAsync(int lineIdx)
             {
+                if (Volatile.Read(ref abortError) is not null) return;
                 var line = lines[lineIdx];
                 var lineUrl = $"https://www.chessable.com/api/v1/getGame?lng=en&uid={uid}&oid={line.Id}";
                 string round = $"{(chapterIdx + 2):000}.{(lineIdx + 2):000}";
@@ -578,11 +599,22 @@ public class ChessableHttpService : IChessableHttpService
                             lineContent = "";
                         }
 
-                        // Nur einen vollständig als ResponseLine parsbaren Body akzeptieren — ein
-                        // abgeschnittener (nicht-leerer) Body würde sonst als "Erfolg" durchgehen
-                        // und den Cache/Export vergiften.
+                        // Nur einen Body akzeptieren, der die gemeinsame Prüfregel besteht — ein abgeschnittener
+                        // Body, eine Antwort ohne game-Objekt oder ein Chessable-Fehlerkörper würde sonst als
+                        // "Erfolg" durchgehen und den Cache/Export vergiften.
                         if (LineParses(lineContent))
                             break;
+
+                        // Fehlerkörper (HTTP 200): Token tot → sofort abbrechen, sonst Fehlversuch mit Retry
+                        // und Abbruch nach dem letzten Versuch. Eine tote Linie kommt leer, nicht als Fehler.
+                        var lineApiError = TryGetChessableErrorMessage(lineContent ?? "", out var lineTokenError);
+                        if (lineTokenError || (lineApiError is not null && attempt == 9))
+                        {
+                            Interlocked.CompareExchange(ref abortError,
+                                lineTokenError ? lineApiError : $"{lineApiError} (Linie {line.Id}, nach 10 Versuchen)", null);
+                            return;
+                        }
+                        if (Volatile.Read(ref abortError) is not null) return;
 
                         if (attempt < 9)
                         {
@@ -617,7 +649,7 @@ public class ChessableHttpService : IChessableHttpService
 
             if (_parallelLineFetches <= 1)
             {
-                for (int lineIdx = 0; lineIdx < lines.Count; lineIdx++)
+                for (int lineIdx = 0; lineIdx < lines.Count && abortError is null; lineIdx++)
                 {
                     ct.ThrowIfCancellationRequested();
                     await FetchLineAsync(lineIdx);
@@ -631,6 +663,7 @@ public class ChessableHttpService : IChessableHttpService
                 {
                     ct.ThrowIfCancellationRequested();
                     await sem.WaitAsync(ct);
+                    if (Volatile.Read(ref abortError) is not null) { sem.Release(); break; }
                     int idx = lineIdx;
                     tasks.Add(Task.Run(async () =>
                     {
@@ -640,6 +673,9 @@ public class ChessableHttpService : IChessableHttpService
                 }
                 await Task.WhenAll(tasks);
             }
+
+            if (abortError is not null)
+                return AbortFetch(bid, abortError);
 
             // In Original-Reihenfolge anhängen (Parallelität ändert die Reihenfolge nicht).
             foreach (var slot in lineSlots)
@@ -653,6 +689,13 @@ public class ChessableHttpService : IChessableHttpService
         }
 
         return (restResponseCourse, null);
+    }
+
+    /// <summary>Bricht den Kursabruf mit einer Chessable-Fehlermeldung ab (kein Teil-Kurs, nichts wird gecacht).</summary>
+    private (RestResponseCourse? data, string? error) AbortFetch(string bid, string error)
+    {
+        _logger.LogWarning("Kursabruf bid {Bid} abgebrochen: {Error}", bid, error);
+        return (null, error);
     }
 
     /// <param name="coupleToken">Ob dieser Request die token-gekoppelte IP-Rotation auslösen darf.
@@ -804,17 +847,18 @@ public class ChessableHttpService : IChessableHttpService
     /// im Gegensatz zu echten Fehlern (DNS, 401, …).
     /// </summary>
     /// <summary>
-    /// Parst den getList-Body zu <see cref="ResponseChapter"/>. Liefert null bei leerem/<c>{}</c>-
-    /// Body ODER bei abgeschnittenem/korruptem JSON (JsonException) → Signal zum Neu-Holen.
-    /// Ein legitim leeres Kapitel (<c>{"list":{"data":[]}}</c>) parst dagegen und gilt als gültig.
+    /// Parst den getList-Body zu <see cref="ResponseChapter"/>. Liefert null, wenn er die gemeinsame Prüfregel
+    /// (<see cref="ChessableContent.ChapterReason"/>) nicht besteht: leer/<c>{}</c>, abgeschnittenes/korruptes
+    /// JSON oder ein Chessable-Fehlerkörper → Signal zum Neu-Holen. Ein legitim leeres Kapitel
+    /// (<c>{"list":{"data":[]}}</c>) gilt als gültig.
     /// </summary>
     private static ResponseChapter? TryParseChapter(string? content)
     {
-        if (string.IsNullOrWhiteSpace(content) || content == "{}")
+        if (ChessableContent.ChapterReason(content) is not null)
             return null;
         try
         {
-            return JsonSerializer.Deserialize<ResponseChapter>(content, JsonOpts);
+            return JsonSerializer.Deserialize<ResponseChapter>(content!, JsonOpts);
         }
         catch (JsonException)
         {
@@ -822,20 +866,9 @@ public class ChessableHttpService : IChessableHttpService
         }
     }
 
-    /// <summary>True, wenn der getGame-Body vollständig als <see cref="ResponseLine"/> parst.</summary>
-    private static bool LineParses(string? content)
-    {
-        if (string.IsNullOrWhiteSpace(content) || content == "{}")
-            return false;
-        try
-        {
-            return JsonSerializer.Deserialize<ResponseLine>(content, JsonOpts) is not null;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
+    /// <summary>True, wenn der getGame-Body die gemeinsame Prüfregel besteht (<see cref="ChessableContent.LineReason"/>:
+    /// parst als <see cref="ResponseLine"/>, trägt ein game-Objekt, ist kein Chessable-Fehlerkörper).</summary>
+    private static bool LineParses(string? content) => ChessableContent.LineReason(content) is null;
 
     public static bool IsTransientProxyFailure(int exitCode, string? error)
     {
