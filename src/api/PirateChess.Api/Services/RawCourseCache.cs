@@ -298,6 +298,8 @@ public class RawCourseCache
     /// Import komplett neu von Chessable geholt. Jetzt werden wenige tote Linien toleriert und als Lücke
     /// mitgecacht; ABGESCHNITTENE (nicht-leere, unparsbare) Linien und fehlende/kaputte Kapitel bleiben
     /// hart „unvollständig" (transienter Proxy-Cut → soll frisch geholt werden, nicht als Lücke zementiert).
+    /// Geprüft wird mit der gemeinsamen Regel (<see cref="ChessableContent"/>): auch eine Linie ohne game-Objekt
+    /// und ein Chessable-Fehlerkörper (Kapitel oder Linie) sind „unvollständig", nicht verwertbar.
     /// </summary>
     public static bool IsComplete(RestResponseCourse? course, int maxUnusableLines = DefaultMaxUnusableLines)
     {
@@ -308,39 +310,23 @@ public class RawCourseCache
         {
             // Kapitel müssen IMMER vollständig da sein — ein fehlendes/abgeschnittenes Kapitel ist ein
             // echtes Truncation-Problem (nicht bloß eine tote Einzel-Linie) und macht den Kurs uncachebar.
-            if (string.IsNullOrWhiteSpace(ch.ChapterJsonContent) || ch.ChapterJsonContent == "{}")
+            if (ChessableContent.ChapterReason(ch.ChapterJsonContent) is not null)
                 return false;
-            try
-            {
-                if (JsonSerializer.Deserialize<ResponseChapter>(ch.ChapterJsonContent, JsonOpts) is null)
-                    return false;
-            }
-            catch (JsonException)
-            {
-                return false;
-            }
             if (ch.ResponseLineList is null)
                 continue;
             foreach (var ln in ch.ResponseLineList)
             {
                 // Leere/{}-Linie = Chessable liefert für diese oid nichts (tote/entfernte Linie) → als
                 // Lücke zählen und bis zur Obergrenze tolerieren.
-                if (string.IsNullOrWhiteSpace(ln.LineJsonContent) || ln.LineJsonContent == "{}")
+                if (ChessableContent.IsEmpty(ln.LineJsonContent))
                 {
                     unusable++;
                     continue;
                 }
-                // Nicht-leerer, aber unparsbarer Content = abgeschnitten (Proxy-Cut) → transientes
-                // Problem, NICHT tolerieren: der Kurs soll frisch geholt werden, bis die Linie ganz ankommt.
-                try
-                {
-                    if (JsonSerializer.Deserialize<ResponseLine>(ln.LineJsonContent, JsonOpts) is null)
-                        return false;
-                }
-                catch (JsonException)
-                {
+                // Nicht-leerer, aber ungültiger Content (abgeschnitten, kein game-Objekt, Fehlerkörper) →
+                // transientes Problem, NICHT tolerieren: der Kurs soll frisch geholt werden, bis die Linie ganz ankommt.
+                if (ChessableContent.LineReason(ln.LineJsonContent) is not null)
                     return false;
-                }
                 usable++;
             }
         }
@@ -417,38 +403,61 @@ public class RawCourseCache
     /// <see cref="GetAsync"/> sie aus dem Struktur-Blob rekonstruieren kann. In der Praxis hat der
     /// Fetch die Linien bereits gecacht → der Existenz-Check findet alle vor und schreibt nichts
     /// (nur eine günstige Abfrage). Macht den Kurs-Cache aber self-contained (robust, falls eine
-    /// Linie beim Fetch nicht im Cache landete).
+    /// Linie beim Fetch nicht im Cache landete). Es gelten die Regeln des Linien-Caches
+    /// (<see cref="RawLineCache"/>): leere Linien werden nicht abgelegt, eine ungültige nur markiert, ein
+    /// gültiger Eintrag nie überschrieben; eine markierte Zeile ersetzt nur gültiger Inhalt (alter ins Archiv).
     /// </summary>
     private static async Task SeedLinesAsync(AppDbContext db, RestResponseCourse course, CancellationToken ct)
     {
         var lines = course.ChapterList
             .SelectMany(ch => ch.ResponseLineList)
-            .Where(ln => ln.Oid > 0 && !string.IsNullOrEmpty(ln.LineJsonContent))
+            .Where(ln => ln.Oid > 0 && !ChessableContent.IsEmpty(ln.LineJsonContent))
             .GroupBy(ln => ln.Oid).Select(g => g.First())
             .ToList();
         if (lines.Count == 0) return;
 
-        var existing = new HashSet<int>();
+        var valid = new HashSet<int>();
+        var marked = new Dictionary<int, int>();   // Oid → Id einer als ungültig markierten Zeile
         foreach (var chunk in lines.Select(l => l.Oid).Chunk(1000))
-            existing.UnionWith(await db.CachedRawLines.AsNoTracking()
-                .Where(c => chunk.Contains(c.Oid)).Select(c => c.Oid).ToListAsync(ct));
-
-        var toAdd = lines.Where(l => !existing.Contains(l.Oid))
-            .Select(l => new CachedRawLine
+            foreach (var e in await db.CachedRawLines.AsNoTracking()
+                         .Where(c => chunk.Contains(c.Oid)).Select(c => new { c.Id, c.Oid, c.InvalidAt }).ToListAsync(ct))
             {
-                Oid = l.Oid,
-                LineJsonContent = GzipText.Compress(l.LineJsonContent!),
-                CachedAt = DateTime.UtcNow
-            }).ToList();
-        if (toAdd.Count == 0) return;
-        db.CachedRawLines.AddRange(toAdd);
+                if (e.InvalidAt is null) valid.Add(e.Oid);
+                else marked[e.Oid] = e.Id;
+            }
+
+        var now = DateTime.UtcNow;
+        var changed = 0;
+        foreach (var l in lines.Where(l => !valid.Contains(l.Oid)))
+        {
+            var reason = ChessableContent.LineReason(l.LineJsonContent);
+            if (marked.TryGetValue(l.Oid, out var id))
+            {
+                if (reason is not null) continue;   // ungültig ersetzt nie einen vorhandenen Stand
+                RawLineCache.Heal(db, await db.CachedRawLines.FirstAsync(c => c.Id == id, ct), GzipText.Compress(l.LineJsonContent!), now);
+            }
+            else
+            {
+                db.CachedRawLines.Add(new CachedRawLine
+                {
+                    Oid = l.Oid,
+                    LineJsonContent = GzipText.Compress(l.LineJsonContent!),
+                    CachedAt = now,
+                    InvalidAt = reason is null ? null : now,
+                    InvalidReason = reason,
+                });
+            }
+            changed++;
+        }
+        if (changed == 0) return;
         await db.SaveChangesAsync(ct);
     }
 
     /// <summary>
     /// Füllt fehlende Linieninhalte (neues Struktur-Format: <c>Oid &gt; 0</c>, leerer Content) aus
     /// <c>CachedRawLines</c> nach — gebatcht. Alte Voll-Blobs (Content vorhanden / Oid 0) bleiben
-    /// unangetastet → abwärtskompatibel.
+    /// unangetastet → abwärtskompatibel. Als ungültig markierte Zeilen füllen nichts (sie gelten nirgends
+    /// als gecacht): die Linie bleibt eine Lücke, die <see cref="IsComplete"/> wie eine tote Linie zählt.
     /// </summary>
     private static async Task ReconstructLinesAsync(AppDbContext db, RestResponseCourse course, CancellationToken ct)
     {
@@ -462,7 +471,7 @@ public class RawCourseCache
         foreach (var chunk in missing.Chunk(1000))
         {
             var rows = await db.CachedRawLines.AsNoTracking()
-                .Where(c => chunk.Contains(c.Oid))
+                .Where(c => chunk.Contains(c.Oid) && c.InvalidAt == null)
                 .Select(c => new { c.Oid, c.LineJsonContent })
                 .ToListAsync(ct);
             foreach (var r in rows)

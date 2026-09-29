@@ -277,6 +277,112 @@ public class RawCourseCacheTests
         Assert.Null(await cache.GetAsync("miss")); // Linie 9999 fehlt → IsComplete false → Cache-Miss
     }
 
+    // --- Eine Prüfregel (S2-002): markierte Linien füllen keinen Import, SeedLinesAsync prüft wie der Linien-Cache ---
+
+    private static (RawCourseCache cache, IServiceScopeFactory sf) BuildWithScope()
+    {
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(dbName));
+        var sf = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+        return (new RawCourseCache(sf, NullLogger<RawCourseCache>.Instance), sf);
+    }
+
+    private static RestResponseCourse CourseWith(params (int Oid, string Content)[] lines)
+    {
+        var c = new RestResponseCourse { CourseJsonContent = "{}" };
+        var ch = new RestResponseChapter { ChapterJsonContent = "{\"list\":{}}" };
+        foreach (var (oid, content) in lines)
+            ch.ResponseLineList.Add(new RestResponseLine { Oid = oid, LineJsonContent = content });
+        c.ChapterList.Add(ch);
+        return c;
+    }
+
+    // Ein als ungültig markierter Linien-Eintrag („kein game-Objekt", z. B. eine der 31 „banned"-Antworten)
+    // wurde beim Lesen trotzdem in den Kurs gefüllt und als Partie ohne Züge exportiert. Jetzt: Lücke.
+    [Fact]
+    public async Task Get_MarkedLine_IsAGap_NotFilledIntoTheImport()
+    {
+        var (cache, sf) = BuildWithScope();
+        await cache.SetAsync("bidM", CourseWith((1, "{\"game\":{}}"), (2, "{\"game\":{}}"), (3, "{\"game\":{}}"), (4, "{\"game\":{}}")));
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var row = await db.CachedRawLines.FirstAsync(l => l.Oid == 2);
+            row.LineJsonContent = GzipText.Compress("{\"x\":1}");
+            row.InvalidAt = DateTime.UtcNow;
+            row.InvalidReason = "kein game-Objekt";
+            await db.SaveChangesAsync();
+        }
+
+        var got = await cache.GetAsync("bidM");
+
+        Assert.NotNull(got);                                     // eine Lücke liegt in der Toleranz
+        var lines = got!.ChapterList[0].ResponseLineList;
+        Assert.True(string.IsNullOrEmpty(lines.Single(l => l.Oid == 2).LineJsonContent));
+        Assert.Equal("{\"game\":{}}", lines.Single(l => l.Oid == 1).LineJsonContent);
+    }
+
+    // SeedLinesAsync legte eine {}-Linie als gültigen Eintrag ab → lines/cached meldete sie allen als gecacht.
+    [Fact]
+    public async Task Set_EmptyBraceLine_IsNotSeededIntoTheLineCache()
+    {
+        var (cache, sf) = BuildWithScope();
+
+        await cache.SetAsync("bidE", CourseWith((1, "{\"game\":{}}"), (2, "{\"game\":{}}"), (3, "{\"game\":{}}"), (50, "{}")));
+
+        Assert.NotNull(await cache.GetAsync("bidE"));          // tote Linie = tolerierte Lücke
+        using var scope = sf.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.False(await db.CachedRawLines.AnyAsync(l => l.Oid == 50));
+    }
+
+    // Browser-Upload complete=true mit {"x":1}: AddMissingAsync lehnte die Linie ab, SetAsync → SeedLinesAsync
+    // legte sie direkt danach unmarkiert ab, und der Kurs galt als vollständig.
+    [Fact]
+    public async Task Set_LineWithoutGameObject_NotCached_AndNotSeeded()
+    {
+        var (cache, sf) = BuildWithScope();
+
+        await cache.SetAsync("bidX1", CourseWith((1, "{\"game\":{}}"), (2, "{\"game\":{}}"), (60, "{\"x\":1}")));
+
+        Assert.Null(await cache.GetAsync("bidX1"));
+        using var scope = sf.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.False(await db.CachedRawLines.AnyAsync(l => l.Oid == 60 && l.InvalidAt == null));
+    }
+
+    // Gültiger Inhalt einer markierten oid ersetzt die Markierung wie im Linien-Cache (alter Stand ins Archiv),
+    // sonst bliebe die Linie im frisch geschriebenen Kurs eine Lücke.
+    [Fact]
+    public async Task Set_ValidContent_HealsAMarkedLine_OldContentArchived()
+    {
+        var (cache, sf) = BuildWithScope();
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.CachedRawLines.Add(new CachedRawLine
+            {
+                Oid = 70, LineJsonContent = GzipText.Compress("{\"game\":{\"data\":["), CachedAt = DateTime.UtcNow,
+                InvalidAt = DateTime.UtcNow, InvalidReason = "JSON: abgeschnitten",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await cache.SetAsync("bidH", CourseWith((1, "{\"game\":{}}"), (70, "{\"game\":{\"x\":7}}")));
+
+        var got = await cache.GetAsync("bidH");
+        Assert.Equal("{\"game\":{\"x\":7}}", got!.ChapterList[0].ResponseLineList.Single(l => l.Oid == 70).LineJsonContent);
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var row = await db.CachedRawLines.SingleAsync(l => l.Oid == 70);
+            Assert.Null(row.InvalidAt);
+            var archived = await db.CachedRawLineArchive.SingleAsync(a => a.Oid == 70);
+            Assert.Equal("{\"game\":{\"data\":[", GzipText.Decompress(archived.LineJsonContent));
+        }
+    }
+
     // Selbstheilung: ein bereits (vor der Härtung) truncated gecachter Kurs wird beim Lesen
     // erkannt, gelöscht und als Cache-Miss gemeldet → der laufende Import zieht sofort frisch.
     [Fact]

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.Entities;
@@ -16,9 +15,9 @@ namespace PirateChess.Api.Services;
 ///
 /// <para><b>Ungültige Linien werden markiert, nie gelöscht</b> (<see cref="CachedRawLine.InvalidAt"/>). Anlass:
 /// oid 36114125 (Kurs 207313) lag seit 2026-06-14 abgeschnitten im Cache; die Extension hielt die Linie für
-/// gecacht, schickte nur ihre oid, und der Parser übersprang sie bei jedem Import still. Geprüft wird wie der
-/// Parser liest (<see cref="InvalidReason"/>) — beim Schreiben, beim Auffüllen eines Imports und beim
-/// Resume-Lesen. Markierte Linien gelten nirgends als gecacht; ihr Inhalt bleibt, und
+/// gecacht, schickte nur ihre oid, und der Parser übersprang sie bei jedem Import still. Geprüft wird mit der
+/// gemeinsamen Regel <see cref="ChessableContent.LineReason"/> (<see cref="InvalidReason"/>) — beim Schreiben, beim
+/// Auffüllen eines Imports und beim Resume-Lesen. Markierte Linien gelten nirgends als gecacht; ihr Inhalt bleibt, und
 /// <see cref="RevalidateAsync"/> gibt sie wieder frei, wenn sie eine korrigierte Prüfung bestehen. Ersetzt wird
 /// eine markierte Linie nur durch eine gültige, der alte Inhalt wandert dabei nach
 /// <see cref="CachedRawLineArchive"/>.</para>
@@ -27,7 +26,6 @@ public class RawLineCache
 {
     private const int InvalidReasonMaxLength = 200;
     private const int MaxListed = 1000;
-    private static readonly JsonSerializerOptions ParserJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RawLineCache> _logger;
@@ -39,27 +37,13 @@ public class RawLineCache
     }
 
     /// <summary>Eine Linie ist nicht leer, wenn ihr Roh-Content nicht leer und nicht <c>{}</c> ist.</summary>
-    public static bool IsComplete(string? content)
-        => !string.IsNullOrWhiteSpace(content) && content != "{}";
+    public static bool IsComplete(string? content) => !ChessableContent.IsEmpty(content);
 
     /// <summary>
-    /// Warum ein Linien-Inhalt nicht taugt, oder <c>null</c>. Dieselbe Deserialisierung wie der Parser
-    /// (<c>ResponseLine</c>, sonst „Linien-JSON übersprungen (korrupt/abgeschnitten)"), dazu das game-Objekt:
-    /// ein beliebiges JSON wie <c>{"x":1}</c> parst sonst zu einer leeren Linie.
+    /// Warum ein Linien-Inhalt nicht taugt, oder <c>null</c> — die gemeinsame Regel
+    /// <see cref="ChessableContent.LineReason"/> (Parser-Deserialisierung, game-Objekt, Chessable-Fehlerkörper).
     /// </summary>
-    public static string? InvalidReason(string? content)
-    {
-        if (!IsComplete(content)) return "leer";
-        try
-        {
-            JsonSerializer.Deserialize<piratechess_lib.ResponseLine>(content!, ParserJsonOptions);
-        }
-        catch (JsonException ex)
-        {
-            return Trim("JSON: " + ex.Message);
-        }
-        return BrowserCourseAssembler.HasGameObject(content!) ? null : "kein game-Objekt";
-    }
+    public static string? InvalidReason(string? content) => ChessableContent.LineReason(content);
 
     private static string Trim(string s) => s.Length <= InvalidReasonMaxLength ? s : s[..InvalidReasonMaxLength];
 
@@ -97,7 +81,7 @@ public class RawLineCache
         });
 
     /// <summary>Eine markierte Zeile durch gültigen Inhalt ersetzen; der alte Inhalt kommt ins Archiv.</summary>
-    private static void Heal(AppDbContext db, CachedRawLine row, string compressed, DateTime now)
+    internal static void Heal(AppDbContext db, CachedRawLine row, string compressed, DateTime now)
     {
         Archive(db, row, now);
         row.LineJsonContent = compressed;
