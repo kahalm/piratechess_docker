@@ -111,7 +111,130 @@ public class RawCourseReconstructorTests
         Assert.Equal(3, r.Lines);
         Assert.Equal(0, r.MissingLines);
         Assert.Equal(1, r.UnparseableLines);
-        Assert.NotNull(await cache.GetAsync("778"));
+        var got = await cache.GetAsync("778");
+        Assert.NotNull(got);
+        Assert.True(string.IsNullOrEmpty(got!.ChapterList[0].ResponseLineList.Single(l => l.Oid == 102).LineJsonContent));
+
+        // Markiert statt gelöscht: CachedRawLines ist der einzige dauerhafte Linien-Speicher.
+        using var verify = sf.CreateScope();
+        var vdb = verify.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Equal(3, await vdb.CachedRawLines.CountAsync());
+        var row = await vdb.CachedRawLines.SingleAsync(c => c.Oid == 102);
+        Assert.NotNull(row.InvalidAt);
+        Assert.StartsWith("JSON:", row.InvalidReason);
+        Assert.Equal("{\"game\":{", GzipText.Decompress(row.LineJsonContent));
+    }
+
+    private static async Task SeedCourseAsync(IServiceScopeFactory sf, string bid, params int[] oids)
+    {
+        using var scope = sf.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.ChessableRawResponses.Add(new ChessableRawResponse
+        {
+            Endpoint = "course",
+            Url = $"https://www.chessable.com/api/v1/getCourse?uid=1&bid={bid}&includeVariations=true",
+            RawJson = GzipText.Compress("{\"course\":{\"data\":[{\"id\":1}]}}"),
+            RequestedAt = DateTime.UtcNow
+        });
+        db.ChessableRawResponses.Add(new ChessableRawResponse
+        {
+            Endpoint = "chapter",
+            Url = $"https://www.chessable.com/api/v1/getList?uid=1&bid={bid}&lid=1",
+            RawJson = GzipText.Compress("{\"list\":{\"data\":[" + string.Join(",", oids.Select(o => $"{{\"id\":{o}}}")) + "]}}"),
+            RequestedAt = DateTime.UtcNow.AddMinutes(-1)
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static async Task AddLineAsync(IServiceScopeFactory sf, int oid, string content, DateTime? invalidAt = null, string? reason = null)
+    {
+        using var scope = sf.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.CachedRawLines.Add(new CachedRawLine
+        {
+            Oid = oid, LineJsonContent = GzipText.Compress(content), CachedAt = DateTime.UtcNow,
+            InvalidAt = invalidAt, InvalidReason = reason,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    // Scheitert die Rekonstruktion („Cache NICHT geschrieben"), darf sie vorher nichts angefasst haben —
+    // früher waren die unbrauchbaren Zeilen da schon per RemoveRange weg.
+    [Fact]
+    public async Task Reconstruct_TooManyUnusableLines_Fails_WithoutTouchingTheLineCache()
+    {
+        var (rec, cache, sf) = Build();
+        var oids = Enumerable.Range(300, 8).ToArray();
+        await SeedCourseAsync(sf, "780", oids);
+        await AddLineAsync(sf, 300, "{\"game\":{}}");
+        await AddLineAsync(sf, 301, "{\"game\":{}}");
+        foreach (var oid in oids.Skip(2))
+            await AddLineAsync(sf, oid, "{\"game\":{");          // 6 abgeschnittene > Toleranz 5
+
+        var r = await rec.ReconstructAsync("780");
+
+        Assert.False(r.Ok);
+        Assert.Equal(6, r.UnparseableLines);
+        Assert.Null(await cache.GetAsync("780"));
+        using var scope = sf.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Equal(8, await db.CachedRawLines.CountAsync());
+        Assert.False(await db.CachedRawLines.AnyAsync(c => c.InvalidAt != null));   // keine Schreibaktion
+    }
+
+    // Eine schon markierte Linie, die der heutige Parser nicht liest (softFail als Objekt, bid 2033 — aufgehoben
+    // für einen späteren Parser-Fix), wurde bei der Rekonstruktion unwiderruflich gelöscht.
+    [Fact]
+    public async Task Reconstruct_AlreadyMarkedLine_KeepsItsMarkAndContent()
+    {
+        var (rec, cache, sf) = Build();
+        const string softFailObject = "{\"game\":{\"softFail\":{\"1\":{\"w\":[\"e4\"]}}}}";
+        var markedAt = new DateTime(2026, 9, 15, 10, 0, 0, DateTimeKind.Utc);
+        await SeedCourseAsync(sf, "781", 400, 401, 402);
+        await AddLineAsync(sf, 400, "{\"game\":{}}");
+        await AddLineAsync(sf, 401, "{\"game\":{}}");
+        await AddLineAsync(sf, 402, softFailObject, markedAt, "JSON: softFail");
+
+        var r = await rec.ReconstructAsync("781");
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(1, r.UnparseableLines);
+        Assert.NotNull(await cache.GetAsync("781"));
+        using var scope = sf.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var row = await db.CachedRawLines.SingleAsync(c => c.Oid == 402);
+        Assert.Equal(markedAt, row.InvalidAt);                       // ursprüngliche Markierung bleibt
+        Assert.Equal("JSON: softFail", row.InvalidReason);
+        Assert.Equal(softFailObject, GzipText.Decompress(row.LineJsonContent));
+    }
+
+    // Die neueste getList-Antwort im Audit ist ein Fehlerkörper (Token mitten im Import abgelaufen) → die
+    // Rekonstruktion nimmt die ältere, gültige Antwort statt eines Kapitels ohne Linien.
+    [Fact]
+    public async Task Reconstruct_SkipsAChapterErrorBody_UsesTheOlderValidResponse()
+    {
+        var (rec, cache, sf) = Build();
+        await SeedCourseAsync(sf, "782", 500, 501);
+        await AddLineAsync(sf, 500, "{\"game\":{}}");
+        await AddLineAsync(sf, 501, "{\"game\":{}}");
+        using (var scope = sf.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.ChessableRawResponses.Add(new ChessableRawResponse
+            {
+                Endpoint = "chapter",
+                Url = "https://www.chessable.com/api/v1/getList?uid=1&bid=782&lid=1",
+                RawJson = GzipText.Compress("{\"error\":{\"message\":\"Expired token\"}}"),
+                RequestedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var r = await rec.ReconstructAsync("782");
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(2, r.Lines);
+        Assert.NotNull(await cache.GetAsync("782"));
     }
 
     // Der Pre-Write-Gate muss mit der INSTANZ-Toleranz des Caches prüfen, nicht mit dem statischen

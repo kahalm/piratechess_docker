@@ -17,6 +17,9 @@ namespace PirateChess.Api.Services;
 /// </list>
 /// Gedacht für Kurse, deren aktueller Bearer-Account sie nicht (mehr) besitzt (BOOK_NOT_OWNED), deren
 /// Rohantworten aber noch vorliegen. Wartungs-/Einmal-Aktion — kein Hot-Path.
+/// <para>Löscht nie etwas: <c>CachedRawLines</c> ist der einzige dauerhafte Linien-Speicher. Unbrauchbare Linien
+/// werden als ungültig markiert (Inhalt bleibt, <see cref="RawLineCache.RevalidateAsync"/> kann sie nach einer
+/// Parser-Korrektur freigeben), und geschrieben wird erst, wenn der Kurs die Vollständigkeitsprüfung besteht.</para>
 /// </summary>
 public class RawCourseReconstructor
 {
@@ -77,7 +80,7 @@ public class RawCourseReconstructor
             {
                 if (!UrlHasParam(cr.Url, "lid", chapter.Id.ToString())) continue;
                 var body = SafeDecompress(cr.RawJson);
-                if (body is null) continue;
+                if (body is null || ChessableContent.ChapterReason(body) is not null) continue;   // z. B. Fehlerkörper → ältere Antwort
                 var parsed = SafeParse<ResponseChapter>(body);
                 if (parsed is not null) { chapterJson = body; respChapter = parsed; break; }
             }
@@ -93,12 +96,13 @@ public class RawCourseReconstructor
                     content = "";           // tote/entfernte Linie → als Lücke (IsComplete toleriert bis maxUnusableLines)
                     deadOids.Add(oid);
                 }
-                else if (SafeParse<ResponseLine>(content) is null)
+                else if (ChessableContent.LineReason(content) is not null)
                 {
-                    // Nicht-leerer, aber unparsbarer Inhalt (Proxy-Cut/abgeschnitten). Im NORMALEN Betrieb
-                    // lehnt IsComplete das hart ab (Kurs neu holen). Bei der Einmal-Rekonstruktion ist ein
-                    // frisches Holen nicht möglich (Kurs nicht besessen) → wie eine tote Linie behandeln
-                    // (leeren → als tolerierbare Lücke) und separat zählen, statt die ganze Rekonstruktion zu kippen.
+                    // Nicht-leerer, aber ungültiger Inhalt (abgeschnitten, kein game-Objekt, Fehlerkörper — die
+                    // gemeinsame Regel). Im NORMALEN Betrieb lehnt IsComplete das hart ab (Kurs neu holen). Bei der
+                    // Einmal-Rekonstruktion ist ein frisches Holen nicht möglich (Kurs nicht besessen) → wie eine tote
+                    // Linie behandeln (leeren → als tolerierbare Lücke) und separat zählen, statt die ganze
+                    // Rekonstruktion zu kippen.
                     unparseable++;
                     content = "";
                     deadOids.Add(oid);
@@ -108,39 +112,40 @@ public class RawCourseReconstructor
             rest.ChapterList.Add(restChapter);
         }
 
-        // 3) Tote/abgeschnittene Linien im permanenten Linien-Cache neutralisieren: der Lesepfad
-        //    (RawCourseCache.GetAsync → ReconstructLinesAsync) füllt leere Linien aus CachedRawLines nach
-        //    und IsComplete lehnt einen nicht-leeren, unparsbaren Inhalt HART ab. Bliebe die abgeschnittene
-        //    Zeile stehen, würde der frisch geschriebene Cache beim ersten Lesen sofort wieder verworfen.
-        //    Also die betroffenen Oid-Zeilen entfernen → beim Lesen echte (tolerierbare) Lücke statt Gift.
-        if (deadOids.Count > 0)
-        {
-            foreach (var chunk in deadOids.Distinct().Chunk(500))
-            {
-                var rows = await db.CachedRawLines.Where(c => chunk.Contains(c.Oid)).ToListAsync(ct);
-                foreach (var row in rows)
-                {
-                    // Der Delete ist irreversibel (bei unowned Kursen kein Re-Fetch, line-Audit hat
-                    // Retention) → die Bytes vor dem Entfernen als Forensik-Snippet nach ES loggen.
-                    var snippet = SafeDecompress(row.LineJsonContent ?? "") ?? "<nicht dekomprimierbar>";
-                    _logger.LogWarning(
-                        "Reconstruct bid {Bid}: lösche unbrauchbare CachedRawLine oid {Oid} ({Length} Zeichen), Snippet: {Snippet}",
-                        bid, row.Oid, snippet.Length, snippet.Length > 300 ? snippet[..300] + "…" : snippet);
-                }
-                if (rows.Count > 0) db.CachedRawLines.RemoveRange(rows);
-            }
-            await db.SaveChangesAsync(ct);
-        }
-
-        // 4) In den servable Cache legen. Toleranz = DIESELBE Instanz-Toleranz wie im Lese-/Schreibpfad
-        //    (RawCourseCache.MaxUnusableLines), damit ein hier als vollständig eingestufter Kurs nicht
-        //    von SetAsync verweigert bzw. beim ersten Lesen als „zu viele Lücken" verworfen wird.
+        // 3) Vollständigkeit ZUERST prüfen — vor jeder Schreibaktion. Toleranz = DIESELBE Instanz-Toleranz wie
+        //    im Lese-/Schreibpfad (RawCourseCache.MaxUnusableLines), damit ein hier als vollständig eingestufter
+        //    Kurs nicht von SetAsync verweigert bzw. beim ersten Lesen als „zu viele Lücken" verworfen wird.
         int dead = missing + unparseable;
         if (!RawCourseCache.IsComplete(rest, _cache.MaxUnusableLines))
             return new Result(false,
                 $"Rekonstruktion unvollständig — {dead}/{totalLines} Linien unbrauchbar ({missing} leer, {unparseable} abgeschnitten), mehr als toleriert; Cache NICHT geschrieben.",
                 course.Course.Data.Count, totalLines, missing, unparseable);
 
+        // 4) Tote/unbrauchbare Linien im permanenten Linien-Cache als ungültig MARKIEREN (nie löschen): der
+        //    Lesepfad (RawCourseCache.GetAsync → ReconstructLinesAsync) füllt markierte Zeilen nicht nach, die
+        //    Linie wird dort zur tolerierten Lücke statt zu Gift, das den frisch geschriebenen Cache beim ersten
+        //    Lesen wieder verwirft. Der Inhalt bleibt für eine spätere Parser-Korrektur erhalten; schon
+        //    markierte Zeilen behalten ihre ursprüngliche Markierung.
+        if (deadOids.Count > 0)
+        {
+            var now = DateTime.UtcNow;
+            foreach (var chunk in deadOids.Distinct().Chunk(500))
+            {
+                var rows = await db.CachedRawLines.Where(c => chunk.Contains(c.Oid) && c.InvalidAt == null).ToListAsync(ct);
+                foreach (var row in rows)
+                {
+                    var reason = ChessableContent.LineReason(SafeDecompress(row.LineJsonContent ?? "") ?? "");
+                    row.InvalidAt = now;
+                    row.InvalidReason = reason ?? "Rekonstruktion: unbrauchbar";
+                    _logger.LogWarning(
+                        "Reconstruct bid {Bid}: markiere unbrauchbare CachedRawLine oid {Oid} als ungültig ({Reason}) — Inhalt bleibt erhalten",
+                        bid, row.Oid, row.InvalidReason);
+                }
+            }
+            await db.SaveChangesAsync(ct);
+        }
+
+        // 5) In den servable Cache legen.
         await _cache.SetAsync(bid, rest, ct);
         _logger.LogInformation("RawCourse aus Rohdaten rekonstruiert: bid {Bid}, {Chapters} Kapitel, {Lines} Linien ({Missing} leer, {Unparseable} abgeschnitten)",
             bid, course.Course.Data.Count, totalLines, missing, unparseable);
