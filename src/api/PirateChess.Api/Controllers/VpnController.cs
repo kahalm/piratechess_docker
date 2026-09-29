@@ -1,4 +1,3 @@
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using PirateChess.Api.Authorization;
 using PirateChess.Api.Services;
@@ -44,10 +43,8 @@ public class VpnController : ControllerBase
     }
 
     /// <summary>Erzwingt eine sofortige Rotation der gluetun-Exit-IP (manueller Trigger / Test).
-    /// JWT allein reicht NICHT: die Registrierung ist offen, ein bloßes Nutzer-JWT könnte sonst die
-    /// geteilte Exit-IP im Sekundentakt rotieren (Import-DoS). Deshalb zusätzlich der X-Service-Key
-    /// (wie direct/*) — beide Schranken müssen passieren.</summary>
-    [Authorize]
+    /// Nur mit X-Service-Key (wie direct/*): ein Nutzer-JWT war selbst ausstellbar und hätte sonst die
+    /// geteilte Exit-IP im Sekundentakt rotieren können (Import-DoS); die Registrierung ist inzwischen aus.</summary>
     [ServiceKeyAuth]
     [HttpPost("rotate")]
     public async Task<IActionResult> Rotate(CancellationToken ct)

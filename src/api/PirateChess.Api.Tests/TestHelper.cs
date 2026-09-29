@@ -1,48 +1,26 @@
-using System.Net.Http.Json;
-using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using PirateChess.Api.Models.DTOs;
+using PirateChess.Api.Services;
 
 namespace PirateChess.Api.Tests;
 
 public static class TestHelper
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
-
-    public record AuthResponse(string Token, string Username);
-
     public static async Task<(HttpClient Client, string Token)> CreateAuthenticatedClientAsync(
         TestWebApplicationFactory factory, string username = "testuser", string password = "Test1234!")
     {
         var client = factory.CreateClient();
 
-        var registerResponse = await client.PostAsJsonAsync("/api/auth/register", new
-        {
-            Username = username,
-            Email = $"{username}@test.com",
-            Password = password
-        });
-
-        AuthResponse? auth;
-        if (registerResponse.StatusCode == System.Net.HttpStatusCode.Conflict)
-        {
-            var loginResponse = await client.PostAsJsonAsync("/api/auth/login", new
-            {
-                Username = username,
-                Password = password
-            });
-            loginResponse.EnsureSuccessStatusCode();
-            auth = await loginResponse.Content.ReadFromJsonAsync<AuthResponse>(JsonOptions);
-        }
-        else
-        {
-            registerResponse.EnsureSuccessStatusCode();
-            auth = await registerResponse.Content.ReadFromJsonAsync<AuthResponse>(JsonOptions);
-        }
+        // Die HTTP-Registrierung ist standardmäßig aus (Auth:RegistrationEnabled) → Nutzer direkt über den
+        // AuthService anlegen bzw., wenn es ihn schon gibt, einloggen.
+        using var scope = factory.Services.CreateScope();
+        var authService = scope.ServiceProvider.GetRequiredService<AuthService>();
+        var auth = await authService.RegisterAsync(new RegisterRequest(username, $"{username}@test.com", password))
+            ?? await authService.LoginAsync(new LoginRequest(username, password))
+            ?? throw new InvalidOperationException($"Test user {username} could not be created or logged in");
 
         client.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", auth!.Token);
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", auth.Token);
 
         return (client, auth.Token);
     }

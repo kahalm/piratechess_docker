@@ -23,6 +23,10 @@
 
 Dieses Repo enthaelt nur noch das Backend. UI/Frontend liegt jetzt komplett im
 RookHub-Stack (`../rookhub`): rookhub-api leitet User-Bearer per X-Service-Key
-an `/api/chessable/direct/*` (Stateless) bzw. nutzt die uebrigen JWT-Endpoints
-fuer Export-Jobs. Inter-Stack-Verkabelung: externes Docker-Netz
-`chessable-bridge`, gemeinsame Elasticsearch fuer Logs.
+an `/api/chessable/direct/*` (Stateless) - das ist der einzige Aufrufer.
+Die JWT-Endpoints (`/api/auth`, `/api/chessable/{credentials,test,courses}`,
+`/api/export`, `/hubs/export-progress`) stammen vom entfernten Frontend und
+haben keinen Aufrufer mehr: die Registrierung ist standardmaessig aus
+(`Auth:RegistrationEnabled`), `/api/vpn/rotate` verlangt nur den Service-Key.
+Inter-Stack-Verkabelung: externes Docker-Netz `chessable-bridge`, gemeinsame
+Elasticsearch fuer Logs.
