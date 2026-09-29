@@ -205,6 +205,14 @@ builder.Services.AddProblemDetails();
 
 var app = builder.Build();
 
+// Platzhalter aus .env.example (change_me…/your_…) sind öffentlich bekannt. Jwt:Secret/Encryption:Key damit → Start
+// abbrechen, gleich in welcher Umgebung (die Beispiel-.env setzt selbst Development, und offen erreichbar ist gerade
+// Dev). Ein Platzhalter-Service-Key gilt als nicht gesetzt (ServiceKeyAuth → 503, fail-closed) und wird laut gemeldet.
+SecretPlaceholder.ThrowIfPlaceholder(app.Configuration, "Jwt:Secret");
+SecretPlaceholder.ThrowIfPlaceholder(app.Configuration, "Encryption:Key");
+if (SecretPlaceholder.IsPlaceholder(app.Configuration["Service:ApiKey"]))
+    app.Logger.LogError("Service:ApiKey is still a placeholder from .env.example — /api/chessable/direct/* and /api/vpn/* answer 503 until a real key is set");
+
 // Auto-migrate on startup (skip for InMemory DB in tests)
 using (var scope = app.Services.CreateScope())
 {

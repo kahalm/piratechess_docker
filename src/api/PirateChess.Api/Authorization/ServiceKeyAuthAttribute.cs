@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
+using PirateChess.Api.Services;
 
 namespace PirateChess.Api.Authorization;
 
@@ -28,7 +29,8 @@ public class ServiceKeyAuthAttribute : Attribute, IAsyncAuthorizationFilter
     public static KeyState Check(HttpContext http)
     {
         var expected = http.RequestServices.GetRequiredService<IConfiguration>()["Service:ApiKey"];
-        if (string.IsNullOrWhiteSpace(expected))
+        // Ein Platzhalter aus .env.example ist öffentlich bekannt → wie „nicht gesetzt“ behandeln (fail-closed, 503).
+        if (string.IsNullOrWhiteSpace(expected) || SecretPlaceholder.IsPlaceholder(expected))
             return KeyState.NotConfigured;
         var header = http.Request.Headers[HeaderName];
         return header.Count == 1 && FixedTimeEquals(header.ToString(), expected) ? KeyState.Valid : KeyState.Invalid;

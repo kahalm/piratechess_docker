@@ -27,8 +27,10 @@ public class EncryptionService
 
     public EncryptionService(IConfiguration configuration)
     {
-        var keyString = configuration["Encryption:Key"]
-            ?? throw new InvalidOperationException("Encryption:Key not configured");
+        var keyString = configuration["Encryption:Key"];
+        // Leer (SHA256 über "") oder ein öffentlich bekannter Platzhalter ist kein Schlüssel → fail-closed.
+        if (string.IsNullOrWhiteSpace(keyString) || SecretPlaceholder.IsPlaceholder(keyString))
+            throw new InvalidOperationException("Encryption:Key not configured");
         _key = SHA256.HashData(Encoding.UTF8.GetBytes(keyString));
         _legacyKey = Encoding.UTF8.GetBytes(keyString.PadRight(32, '0')[..32]);
     }
