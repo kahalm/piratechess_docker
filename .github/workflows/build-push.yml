@@ -1,12 +1,14 @@
 name: Build and Push Docker Images
 
 # Tag-Schema wie der RookHub-Stack:
-#   - Push auf master      → :dev    (+ :sha)     → nur DEV
-#   - Push eines v*-Tags   → :latest (+ :version) → PROD (deliberate release)
+#   - Push auf master        → :dev    (+ :sha)     → nur DEV
+#   - Push eines vX.Y.Z-Tags → :latest (+ :version) → PROD (deliberate release)
+# Nur reine Semver-Tags lösen aus, und der markierte Commit muss auf master liegen: ein Sicherungs-Tag
+# (vorher-umbau, v-test, …) oder ein vX.Y.Z auf einem ungemergten Branch darf nie als :latest nach Prod.
 on:
   push:
     branches: [master]
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
 env:
@@ -21,6 +23,26 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Release-Wächter (nur bei Tags): Tag-Form vX.Y.Z und Commit auf master, sonst Abbruch vor Login/Build.
+      - id: release
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag $TAG ist kein Release-Tag der Form vX.Y.Z"
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/master; then
+            echo "::error::Tag $TAG zeigt auf einen Commit, der nicht auf master liegt"
+            exit 1
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v3
         with:
@@ -32,9 +54,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.OWNER }}/piratechess-api
+          # latest=false: sonst hängt type=semver bei latest=auto zusätzlich selbst :latest an.
+          flavor: |
+            latest=false
           tags: |
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/master' }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.release == 'true' }}
             type=semver,pattern={{version}}
             type=sha
 
