@@ -707,4 +707,168 @@ public class PirateChessLibTests
 
         Assert.Equal("1... c5 2. Nf3 ", game.GeneratePGN(noTrainingMove: true));
     }
+
+    // ---- PGN-Injektion über Nicht-Kommentar-Felder (Review 2026-09-29, S2-017) ----
+    // Nur Kommentare wurden entschärft; San, Pfeil-/Kreisfelder, softFail-Alternativen und Varianten-Züge
+    // gingen roh ins PGN. Eine vergiftete Linie aus dem geteilten Cache (Browser-Upload) konnte so mit
+    // Zeilenumbruch + „[Event …]" eine zweite Partie samt fremdem [ChessableOid] einschleusen — rookhub
+    // zerlegt an „[Event " und nimmt die oid je Block als Wahrheit (die spätere überschreibt die echte).
+    private const string InjectedGame = "\n\n[Event \"x\"]\n[ChessableOid \"999\"]\n\n1. d4";
+
+    private static int CountOf(string haystack, string needle)
+        => (haystack.Length - haystack.Replace(needle, "").Length) / needle.Length;
+
+    [Fact]
+    public void GetCourse_SanWithInjectedGame_LineSkippedNoForeignOid()
+    {
+        string poisoned = Json(new { game = new { initial = "", data = new object[] {
+            new { id = 0, move = 1, col = "w", san = "e4" + InjectedGame } } } });
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"},{\"id\":11,\"name\":\"L2\"}]}}",
+            poisoned,
+            "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"d4\"}]}}");
+        var lib = new PirateChessLib { restResponseCourse = course };
+
+        var (pgn, _) = lib.GetCourse("1", useLocalData: true);
+
+        Assert.DoesNotContain("ChessableOid \"999\"", pgn);
+        Assert.DoesNotContain("ChessableOid \"10\"", pgn);   // die vergiftete Linie fehlt ganz …
+        Assert.Contains("ChessableOid \"11\"", pgn);         // … die saubere bleibt
+        Assert.Equal(1, CountOf(pgn, "[Event "));
+        Assert.Equal(1, lib.ErrorCount);
+        Assert.Contains("GeneratePGN übersprungen", lib.ErrorDetails[0]);
+    }
+
+    [Theory]
+    [InlineData("e4")]
+    [InlineData("exd5")]
+    [InlineData("Nbd2")]
+    [InlineData("R1a3")]
+    [InlineData("Qh4xe1")]
+    [InlineData("Kxe2")]
+    [InlineData("e8=Q+")]
+    [InlineData("exd8=N#")]
+    [InlineData("b8Q")]
+    [InlineData("O-O")]
+    [InlineData("O-O-O+")]
+    [InlineData("0-0")]
+    [InlineData("--")]
+    [InlineData("Nf3!?")]
+    [InlineData("Qxf7#!")]
+    [InlineData("")]        // leer ist harmlos und war schon immer möglich (Verhalten unverändert)
+    public void GeneratePGN_SanForms_Accepted(string san)
+    {
+        var game = new Game { Initial = "", Data = [ new JsonMove { Id = 0, Move = 1, Col = "w", San = san } ] };
+
+        Assert.Equal($"1. {san} ", game.GeneratePGN(noTrainingMove: true));
+    }
+
+    [Theory]
+    [InlineData("e4\n")]
+    [InlineData("e4\r\n[Event \"x\"]")]
+    [InlineData("e4 d5")]
+    [InlineData("e4}")]
+    [InlineData("{e4")]
+    [InlineData("(e4)")]
+    [InlineData("e4;")]
+    [InlineData("e4 %")]
+    [InlineData("[Event")]
+    [InlineData("e9")]
+    [InlineData("Nf3 1-0")]
+    public void GeneratePGN_NonSan_Throws(string san)
+    {
+        var game = new Game { Initial = "", Data = [ new JsonMove { Id = 0, Move = 1, Col = "w", San = san } ] };
+
+        Assert.Throws<FormatException>(() => game.GeneratePGN(noTrainingMove: true));
+    }
+
+    [Fact]
+    public void GeneratePGN_SoftFailEntryNotSan_Dropped()
+    {
+        var game = new Game
+        {
+            Initial = "",
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w" },
+                new JsonMove { Id = 1, Move = 1, San = "e6", Col = "b" },
+            ],
+            SoftFail = [ new SoftFailEntry { B = ["e6", "e5]}" + InjectedGame + " {", "c5"] } ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Contains("[%alt c5]", pgn);
+        Assert.DoesNotContain("[Event", pgn);
+        Assert.DoesNotContain("\n", pgn);
+    }
+
+    [Fact]
+    public void GeneratePGN_DrawFieldsNotSquareOrColor_DrawDropped()
+    {
+        var game = new Game
+        {
+            Initial = "",
+            Data =
+            [
+                new JsonMove
+                {
+                    Id = 0, Move = 1, San = "e4", Col = "w",
+                    Draws =
+                    [
+                        new JsonDraw { Object = "arrow", Color = "g", Start = "e2", End = "e4" },
+                        new JsonDraw { Object = "arrow", Color = "r]}" + InjectedGame + " {", Start = "d2", End = "d4" },
+                        new JsonDraw { Object = "arrow", Color = "r", Start = "d2", End = "d4" + InjectedGame },
+                        new JsonDraw { Object = "circle", Color = "r", Start = "d4" },
+                        new JsonDraw { Object = "circle", Color = "g", Start = "e4}" + InjectedGame },
+                    ],
+                },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Equal("1. e4 {[%cal Ge2e4][%csl Rd4]} ", pgn);
+    }
+
+    private static string AfterWithVJson(string beforeFen, params (string key, string val)[] items) => Json(new
+    {
+        before = beforeFen, after = "",
+        data = new object[] { new { key = "V", state = "", val = items.Select(it => new { key = it.key, state = "", val = it.val }).ToArray() } },
+    });
+
+    [Fact]
+    public void GetVariationPgn_TokenWithLineBreakOrBracket_Discarded()
+    {
+        // „N…f3" löste die alte SAN-Auflösung als Springerzug auf (Mitte ohne Buchstabe/Ziffer = keine
+        // Disambiguierung) und schrieb den ganzen Text als Varianten-Zug ins PGN.
+        var pgn = PgnForFirstMoveWithV(AfterWithVJson(StartFen, ("S", "N" + InjectedGame + " f3")));
+
+        Assert.DoesNotContain("[Event", pgn);
+        Assert.DoesNotContain("ChessableOid", pgn);
+        Assert.Equal("1. e4 ", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_UnresolvableTokenWithBrace_DoesNotBreakOutOfComment()
+    {
+        // Nicht nachspielbare Cluster werden {Kommentar}; ein „}" im Zugtext beendete ihn vorzeitig.
+        var pgn = PgnForFirstMoveWithV(AfterWithVJson(StartFen, ("S", "3...Bb7"), ("S", "4.e3} [Event \"x\"] {")));
+
+        Assert.Contains("{3...Bb7}", pgn);
+        Assert.DoesNotContain("[Event", pgn);
+        Assert.Equal(1, pgn.Count(c => c == '{'));
+        Assert.Equal(1, pgn.Count(c => c == '}'));
+    }
+
+    [Fact]
+    public void GetVariationPgn_ResolvableButNotSan_RenderedAsCommentNotAsMove()
+    {
+        // „N;f3" war für die alte Auflösung ein Springerzug nach f3 — im Movetext beginnt „;" aber einen
+        // Zeilenkommentar und verschluckt die schließende Klammer samt Rest der Linie.
+        var pgn = PgnForFirstMoveWithV(AfterWithVJson(StartFen, ("S", "1.N;f3")));
+
+        Assert.DoesNotContain("(1.N;f3", pgn);
+        Assert.Contains("{1.N;f3}", pgn);
+    }
 }

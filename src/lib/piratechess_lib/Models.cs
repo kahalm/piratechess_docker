@@ -221,12 +221,19 @@ namespace piratechess_lib
                 {
                     pgn += $"{move.Move}... ";
                 }
+                // San geht roh in den Movetext: was kein SAN-Zug ist (Zeilenumbruch + „[Event …]" aus einer
+                // vergifteten Cache-Linie), verwirft die ganze Linie — GetLine überspringt und meldet sie (S2-017).
+                if (!string.IsNullOrEmpty(move.San) && !PgnTokenGuard.IsSan(move.San))
+                    throw new FormatException($"Zug-Id {move.Id}: San ist kein SAN-Zug — Linie verworfen (korrupte oder manipulierte Daten)");
                 pgn += move.San + " ";
 
                 // Chessable kann "draws": null bzw. einzelne null-Eintraege liefern; das Property-Pattern
-                // filtert null-Elemente mit aus (NullRef in GeneratePGN, bid 282212).
-                var arrowList = move.Draws?.Where(x => x is { Object: "arrow" }).ToList() ?? [];
-                var circleList = move.Draws?.Where(x => x is { Object: "circle" }).ToList() ?? [];
+                // filtert null-Elemente mit aus (NullRef in GeneratePGN, bid 282212). Farbe/Felder gehen roh in
+                // [%cal]/[%csl] — nur Farbbuchstaben und echte Felder, sonst entfällt der Eintrag (S2-017).
+                var arrowList = move.Draws?.Where(x => x is { Object: "arrow" } && PgnTokenGuard.IsDrawColor(x.Color)
+                    && PgnTokenGuard.IsSquare(x.Start) && PgnTokenGuard.IsSquare(x.End)).ToList() ?? [];
+                var circleList = move.Draws?.Where(x => x is { Object: "circle" } && PgnTokenGuard.IsDrawColor(x.Color)
+                    && PgnTokenGuard.IsSquare(x.Start)).ToList() ?? [];
 
                 string annotation = "";
 
@@ -265,8 +272,9 @@ namespace piratechess_lib
                         var accepted = move.Col == "w" ? SoftFail[sfIdx].W : SoftFail[sfIdx].B;
                         if (accepted != null)
                         {
+                            // Nur SAN-Züge — ein fremder Eintrag entfällt, die Linie bleibt (S2-017).
                             var alts = accepted
-                                .Where(a => !string.IsNullOrWhiteSpace(a) && a != move.San)
+                                .Where(a => PgnTokenGuard.IsSan(a) && a != move.San)
                                 .Distinct()
                                 .ToList();
                             if (alts.Count > 0)
@@ -697,8 +705,13 @@ namespace piratechess_lib
         /// Threadpool-Stacks (1,5 MB unter Linux). Längere Cluster bleiben als Kommentar vollständig erhalten.</summary>
         private const int MaxVariationPlies = 512;
 
-        private static string SanTextOf(JsonMoveItemList item) =>
-            ((item.Val?.ValueKind == JsonValueKind.String ? item.Val.Value.GetString() : "") ?? "").Trim();
+        /// <summary>Zugtext eines „S"-Eintrags. Mit Zeilenumbruch oder Klammer ist er kein Zug, sondern ein Versuch,
+        /// Variante/Kommentar/Partie vorzeitig zu beenden → verworfen, wie ein leerer Eintrag (S2-017).</summary>
+        private static string SanTextOf(JsonMoveItemList item)
+        {
+            string raw = ((item.Val?.ValueKind == JsonValueKind.String ? item.Val.Value.GetString() : "") ?? "").Trim();
+            return PgnTokenGuard.HasLineBreakOrBracket(raw) ? "" : raw;
+        }
 
         /// <summary>
         /// Spielt die Züge <paramref name="raws"/>[<paramref name="i"/>..] ab <paramref name="fen"/> und liefert sie
@@ -724,7 +737,11 @@ namespace piratechess_lib
             if (game == null) return null;
 
             string raw = raws[i];
-            var candidates = Game.SanCandidates(game, StripMoveNumber(raw));
+            // Nur echte SAN wird Varianten-Zug: SanCandidates liest „N;f3" als Springerzug nach f3, im Movetext
+            // beginnt „;" aber einen Zeilenkommentar. Alles andere bleibt als Kommentar erhalten (S2-017).
+            string san = StripMoveNumber(raw);
+            if (!PgnTokenGuard.IsSan(san)) return null;
+            var candidates = Game.SanCandidates(game, san);
             List<string>? rest = null;
             Move? chosen = null;
             foreach (var candidate in candidates)
@@ -779,7 +796,7 @@ namespace piratechess_lib
             {
                 if (it.Key == "S")
                 {
-                    string s = ((it.Val?.ValueKind == JsonValueKind.String ? it.Val.Value.GetString() : "") ?? "").Trim();
+                    string s = SanTextOf(it);
                     if (s != "") AppendText(sb, s);
                 }
                 else if (it.Key == "C") { string c = it.CommentAfter; if (c != "") AppendText(sb, c); }
