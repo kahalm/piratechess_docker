@@ -61,14 +61,52 @@ public class ReleaseWorkflowTests
     public void ReleaseGuard_RunsAfterFullCheckout_AndBeforeLoginAndBuild()
     {
         var workflow = Workflow();
-        var checkout = workflow.IndexOf("actions/checkout@", StringComparison.Ordinal);
+        // Ab dem build-api-Job suchen: der Test-Job (S2-012) davor hat seinen eigenen Checkout.
+        var job = workflow.IndexOf("\n  build-api:", StringComparison.Ordinal);
+        var checkout = workflow.IndexOf("actions/checkout@", job, StringComparison.Ordinal);
         var guard = workflow.IndexOf("- id: release", StringComparison.Ordinal);
         var login = workflow.IndexOf("docker/login-action@", StringComparison.Ordinal);
         var build = workflow.IndexOf("docker/build-push-action@", StringComparison.Ordinal);
 
-        Assert.True(checkout >= 0 && checkout < guard && guard < login && login < build);
+        Assert.True(job >= 0 && checkout > job && checkout < guard && guard < login && login < build);
         Assert.Matches(@"actions/checkout@v\d+\s*\n\s*with:\s*\n\s*fetch-depth: 0", workflow);
         Assert.Contains("if: github.ref_type == 'tag'", workflow);
+    }
+
+    /// <summary>Die Zeilen eines Jobs unter <c>jobs:</c> (zwei Leerzeichen Einrückung), ohne die Kopfzeile.</summary>
+    private static List<string> JobLines(string job)
+    {
+        var lines = File.ReadAllLines(WorkflowPath);
+        var start = Array.FindIndex(lines, l => l == $"  {job}:");
+        Assert.True(start >= 0, $"job {job} not found");
+        return lines.Skip(start + 1)
+            .TakeWhile(l => l.Trim().Length == 0 || l.TrimStart().StartsWith('#') || l.StartsWith("    "))
+            .ToList();
+    }
+
+    // S2-012: vorher baute und pushte der Workflow :dev/:latest ohne einen einzigen Testlauf — ein roter Stand ging
+    // über Watchtower nach Dev bzw. Prod. Jetzt hängt der Image-Job an einem grünen Test-Job (Muster wie crawler).
+    [Fact]
+    public void BuildJob_NeedsTheTestJob()
+    {
+        var build = JobLines("build-api");
+        Assert.Contains(build, l => l.Trim() == "needs: test");
+    }
+
+    [Fact]
+    public void TestJob_RunsTheApiTestsWithDotnet10_ReadOnly()
+    {
+        var test = JobLines("test");
+        var text = string.Join("\n", test);
+
+        Assert.Matches(@"uses: actions/setup-dotnet@\S+\s*\n\s*with:\s*\n\s*dotnet-version: '10\.0\.x'", text);
+        Assert.Contains(test, l => l.Trim() == "- run: dotnet test src/api/PirateChess.Api.Tests");
+        // Der Pfad im Workflow muss auf das echte Testprojekt zeigen (Umbenennung = rote CI statt stillem Leerlauf).
+        Assert.True(File.Exists(Path.Combine(BuildHardeningTests.RepoRoot(),
+            "src", "api", "PirateChess.Api.Tests", "PirateChess.Api.Tests.csproj")));
+        // Nur Lesezugriff, kein Registry-Login, kein Push.
+        Assert.Contains(test, l => l.Trim() == "contents: read");
+        Assert.DoesNotContain(test, l => l.Contains("packages:") || l.Contains("docker/"));
     }
 
     [Fact]

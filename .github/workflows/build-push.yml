@@ -16,7 +16,20 @@ env:
   OWNER: kahalm
 
 jobs:
+  # Test-Gate (wie rookhub/crawler): kein Image-Push (:dev, :latest), solange die API-Tests nicht grün sind.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet test src/api/PirateChess.Api.Tests
+
   build-api:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
