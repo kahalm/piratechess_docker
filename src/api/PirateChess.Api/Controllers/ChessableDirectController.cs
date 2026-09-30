@@ -579,12 +579,14 @@ public class ChessableDirectController : ControllerBase
         // Besitzer keinen Bearer (mehr) hinterlegt hat, der Kurs aber von jemand anderem gecacht wurde).
         var bearer = request.Bearer ?? string.Empty;
         string uid = string.Empty;
+        piratechess_lib.RestResponseCourse? cached = null;
         if (string.IsNullOrWhiteSpace(bearer))
         {
             // Force-Refresh heißt echter Chessable-Abruf → der Cache-Fallback greift hier nicht.
-            if (request.ForceRefresh || await _rawCache.GetAsync(request.Bid, ct) is null)
+            if (request.ForceRefresh || (cached = await _rawCache.GetAsync(request.Bid, ct)) is null)
                 return BadRequest(new { message = "Bearer is required" });
-            // gecacht → uid bleibt leer (im Cache-Pfad ungenutzt)
+            // gecacht → uid bleibt leer (im Cache-Pfad ungenutzt); der Job nimmt die eben geladenen Daten,
+            // statt den ganzen Kurs gleich noch einmal zu laden und zu entpacken (S2-018).
         }
         else
         {
@@ -598,7 +600,7 @@ public class ChessableDirectController : ControllerBase
         _jobStore.Create(jobId);
         // Fire-and-forget: _chessableHttp + _jobStore sind Singletons → nach Controller-Dispose gültig.
         // Abbruch über DELETE course/{jobId} oder beim Container-Stopp (siehe RunFetchAsync).
-        _ = Task.Run(() => RunFetchAsync(jobId, bearer, uid, request.Bid, mode, request.ForceRefresh));
+        _ = Task.Run(() => RunFetchAsync(jobId, bearer, uid, request.Bid, mode, request.ForceRefresh, cached));
         return Ok(new DirectCourseStartResponse(jobId));
     }
 
@@ -636,7 +638,9 @@ public class ChessableDirectController : ControllerBase
         return Ok(new { cancelled });
     }
 
-    private async Task RunFetchAsync(string jobId, string bearer, string uid, string bid, string mode, bool forceRefresh = false)
+    /// <param name="preloaded">Im Start-Gate schon geladene Rohdaten (nur ohne Bearer und ohne Force-Refresh).</param>
+    private async Task RunFetchAsync(string jobId, string bearer, string uid, string bid, string mode, bool forceRefresh = false,
+        piratechess_lib.RestResponseCourse? preloaded = null)
     {
         var job = _jobStore.Get(jobId);
         if (job is null) return;
@@ -649,7 +653,7 @@ public class ChessableDirectController : ControllerBase
         {
             // Rohdaten aus dem (kurs-/bid-weiten) Cache wiederverwenden → kein Chessable-Call,
             // auch wenn ein anderer User denselben Kurs schon geholt hat.
-            var data = forceRefresh ? null : await _rawCache.GetAsync(bid, ct);
+            var data = forceRefresh ? null : preloaded ?? await _rawCache.GetAsync(bid, ct);
             if (data is null)
             {
                 // Per-Bid-Lock: zwei parallele Cache-Misses desselben Kurses sollen nicht beide über

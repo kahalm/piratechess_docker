@@ -52,7 +52,9 @@ public class RawCourseCache
         _maxUnusableLines = maxUnusableLines;
     }
 
-    public async Task<RestResponseCourse?> GetAsync(string bid, CancellationToken ct = default)
+    /// <summary>Lädt, entpackt und prüft den ganzen Kurs (alle Linien) — teuer bei großen Kursen, darum je Import
+    /// möglichst nur einmal (S2-018). Virtuell nur, damit Tests die Ladevorgänge zählen können.</summary>
+    public virtual async Task<RestResponseCourse?> GetAsync(string bid, CancellationToken ct = default)
     {
         try
         {
@@ -102,7 +104,7 @@ public class RawCourseCache
     /// dem seriellen Fetch-Queue-Pfad und dem sofortigen (parallelen) Detached-Pfad. Würde hier
     /// ein vergifteter Eintrag als „cached" gelten, liefe der eigentlich nötige Chessable-Abruf
     /// am seriellen Pfad vorbei → mehrere Kurse zögen parallel über dieselbe VPN-IP.
-    /// (Lädt/dekomprimiert die Rohdaten — passiert nur einmal pro Import-Start, kein Hot-Path.)
+    /// (Lädt/dekomprimiert die Rohdaten vollständig, jeder Aufruf ist ein voller Ladevorgang — kein Hot-Path.)
     /// </summary>
     // ExistsAsync nutzt BEWUSST GetAsync (lädt+dekomprimiert+prüft Vollständigkeit + heilt einen
     // truncated Cache), NICHT ein billiges AnyAsync: ein unvollständiger Cache darf NICHT als
