@@ -223,6 +223,10 @@ SecretPlaceholder.ThrowIfPlaceholder(app.Configuration, "Jwt:Secret");
 SecretPlaceholder.ThrowIfPlaceholder(app.Configuration, "Encryption:Key");
 if (SecretPlaceholder.IsPlaceholder(app.Configuration["Service:ApiKey"]))
     app.Logger.LogError("Service:ApiKey is still a placeholder from .env.example — /api/chessable/direct/* and /api/vpn/* answer 503 until a real key is set");
+// EncryptionService beim Start auflösen (Fail-Fast wie Jwt:Secret): fehlt Encryption:Key oder ist er leer — Docker
+// reicht ein ungesetztes ${ENCRYPTION_KEY} als Leerstring durch —, bricht der Start hier ab statt erst beim ersten
+// Zugriff des lazy Singletons.
+_ = app.Services.GetRequiredService<EncryptionService>();
 
 // Auto-migrate on startup (skip for InMemory DB in tests)
 using (var scope = app.Services.CreateScope())
