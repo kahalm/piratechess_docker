@@ -692,6 +692,11 @@ namespace piratechess_lib
             return string.Join(" ", parts);
         }
 
+        /// <summary>Höchstzahl Halbzüge, die <see cref="ResolveLine"/> für EINEN Varianten-Cluster nachspielt (= Rekursionstiefe).
+        /// 256 Vollzüge reichen für jede Seitenlinie eines Kurses; 512 Rahmen belegen nur einen Bruchteil des
+        /// Threadpool-Stacks (1,5 MB unter Linux). Längere Cluster bleiben als Kommentar vollständig erhalten.</summary>
+        private const int MaxVariationPlies = 512;
+
         private static string SanTextOf(JsonMoveItemList item) =>
             ((item.Val?.ValueKind == JsonValueKind.String ? item.Val.Value.GetString() : "") ?? "").Trim();
 
@@ -705,9 +710,15 @@ namespace piratechess_lib
         /// PGN-Leser spielen kann. Jetzt wird jede passende Lesart durchgespielt: trägt genau EINE die ganze Folge
         /// (nur nach 16.S3e4 geht 17.Sxb7), wird sie genommen und eindeutig geschrieben („16.N3e4"); tragen
         /// mehrere oder keine, wird der Cluster Kommentar — geraten wird nicht.</para>
+        ///
+        /// <para>Rekursiv je Zug: die Tiefe ist die Clusterlänge, und die kommt ungedeckelt aus den Daten (ein
+        /// Cluster endet nur an einem Zugnummer-Rücksprung). Ein StackOverflow ist in .NET nicht fangbar und
+        /// beendet den ganzen Prozess samt laufender Abrufe — deshalb wird ein Cluster mit mehr als
+        /// <see cref="MaxVariationPlies"/> Zügen nicht nachgespielt, sondern Kommentar (Review 2026-09-29, N3-001).</para>
         /// </summary>
         private static List<string>? ResolveLine(string? fen, List<string> raws, int i)
         {
+            if (raws.Count > MaxVariationPlies) return null;
             if (i >= raws.Count) return [];
             ChessGame? game = TryNewGame(fen);
             if (game == null) return null;

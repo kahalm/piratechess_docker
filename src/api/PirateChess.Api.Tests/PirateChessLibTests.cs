@@ -404,6 +404,83 @@ public class PirateChessLibTests
         Assert.Contains("(16.N5e4 Bf5)", pgn);
     }
 
+    // ---- Lange Varianten-Cluster (Review 2026-09-29, N3-001) -----------------
+    // ResolveLine rief sich je Zug eines Clusters selbst auf, ohne Tiefengrenze. Ein Cluster wird nur an
+    // Zugnummer-Rücksprüngen getrennt, eine lange legale Pendelfolge (Sf3 Sf6 Sg1 Sg8 …) aus einem
+    // Browser-Upload war also EIN Cluster mit beliebig vielen Zügen → StackOverflow, den kein catch fängt:
+    // der ganze piratechess-Prozess starb samt laufender Abrufe. Jetzt: mehr als 512 Halbzüge
+    // (Models.cs MaxVariationPlies) werden nicht nachgespielt, sondern wie jeder nicht auflösbare Cluster
+    // als {Kommentar} ausgegeben — der Inhalt bleibt erhalten.
+    private const int MaxVariationPlies = 512;
+
+    /// <summary>Legale Springer-Pendelfolge ab der Grundstellung: 1.Nf3 Nf6 2.Ng1 Ng8 3.Nf3 …</summary>
+    private static (string key, string val)[] ShuttleLine(int plies) =>
+        Enumerable.Range(0, plies).Select(p =>
+        {
+            int w = p / 2;
+            bool there = w % 2 == 0;
+            return ("S", p % 2 == 0 ? $"{w + 1}.{(there ? "Nf3" : "Ng1")}" : (there ? "Nf6" : "Ng8"));
+        }).ToArray();
+
+    [Fact]
+    public void GetVariationPgn_ClusterAtPlyCap_StillRenderedAsVariation()
+    {
+        // Verhaltensneutral bis zur Grenze: 512 Halbzüge spielen weiter als echte Variante durch.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ShuttleLine(MaxVariationPlies)));
+
+        Assert.Contains("(1.Nf3 Nf6 2.Ng1 Ng8 3.Nf3", pgn);
+        Assert.Contains("256.Ng1 Ng8)", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_ClusterOverPlyCap_RenderedAsCommentNotResolved()
+    {
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ShuttleLine(MaxVariationPlies + 1)));
+
+        Assert.DoesNotContain("(1.Nf3", pgn);
+        Assert.Contains("{1.Nf3 Nf6 2.Ng1 Ng8 3.Nf3", pgn);
+        Assert.Contains("256.Ng1 Ng8 257.Nf3}", pgn);   // nichts abgeschnitten
+    }
+
+    [Fact]
+    public void GetVariationPgn_HugeCluster_NoStackOverflowOnSmallStack()
+    {
+        // Der eigentliche Angriff: 60.000 Halbzüge. Auf einem Thread mit 1 MB Stack (kleiner als die
+        // 1,5 MB der Threadpool-Threads, auf denen GetCourse läuft) hätte die alte Rekursion den
+        // Testprozess beendet; jetzt bleibt die Tiefe unabhängig von der Clusterlänge.
+        string after = AfterWithV(StartFen, ShuttleLine(60_000));
+        string? pgn = null;
+        Exception? error = null;
+        var worker = new Thread(() =>
+        {
+            try { pgn = PgnForFirstMoveWithV(after); }
+            catch (Exception ex) { error = ex; }
+        }, maxStackSize: 1024 * 1024);
+        worker.Start();
+        worker.Join();
+
+        Assert.Null(error);
+        Assert.NotNull(pgn);
+        Assert.DoesNotContain("(1.Nf3", pgn);
+        Assert.Contains("{1.Nf3 Nf6 2.Ng1 Ng8", pgn);
+    }
+
+    [Fact]
+    public void GeneratePGN_DeeplyNestedV_RejectedByJsonDepthLimit()
+    {
+        // FlattenToText rekursiert je verschachtelter V-Ebene. Gedeckelt ist das durch die JSON-Tiefe
+        // (System.Text.Json-Standard 64, Options.cs setzt keine eigene): tiefer Verschachteltes scheitert
+        // schon beim Einlesen mit einer fangbaren JsonException. Wer MaxDepth anhebt, muss FlattenToText
+        // eine eigene Tiefengrenze geben — dieser Test fällt dann um.
+        const int levels = 200;
+        string nested = "{\"key\":\"S\",\"state\":\"\",\"val\":\"1.d4\"}";
+        for (int i = 0; i < levels; i++)
+            nested = $"{{\"key\":\"V\",\"state\":\"\",\"val\":[{nested}]}}";
+        string after = $"{{\"before\":\"{StartFen}\",\"after\":\"\",\"data\":[{nested}]}}";
+
+        Assert.ThrowsAny<System.Text.Json.JsonException>(() => PgnForFirstMoveWithV(after));
+    }
+
     // ---- softFail (geduldete Züge) → [%alt …] ------------------------------
     [Fact]
     public void GeneratePGN_SoftFail_EmittedAsAltAnnotationMinusMainMove()
