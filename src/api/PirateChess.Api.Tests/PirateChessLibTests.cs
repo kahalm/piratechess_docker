@@ -871,4 +871,97 @@ public class PirateChessLibTests
         Assert.DoesNotContain("(1.N;f3", pgn);
         Assert.Contains("{1.N;f3}", pgn);
     }
+
+    // ---- Nacharbeit S2-017: derselbe Hebel über den KOMMENTARTEXT ----
+    // ReplaceCommentStuff ersetzte nur { }; eckige Klammern blieben stehen. Ein „C" mit „[Event …] [ChessableOid …]"
+    // landete wörtlich im {Kommentar}, und rookhubs Zerlegung (?=\[Event ) fand darin eine zweite Partie mit fremder
+    // oid. Zwei „C" in before werden mit Zeilenumbruch verbunden — dann steht „[Event" sogar am Zeilenanfang.
+    private const string ForgedHeaders = "[Event \"x\"] [ChessableOid \"999\"]";
+
+    /// <summary>Nachbau von rookhubs GetCachedLinePgnsAsync: an „[Event " zerlegen, je Block die erste ChessableOid
+    /// als Schlüssel (spätere Blöcke überschreiben frühere).</summary>
+    private static List<string> RookhubSplitOids(string pgn)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var block in System.Text.RegularExpressions.Regex.Split(pgn, @"(?=\[Event )"))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(block, "\\[ChessableOid \"([^\"]+)\"\\]");
+            if (m.Success) result[m.Groups[1].Value] = block.Trim();
+        }
+        return result.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
+    }
+
+    private static (string pgn, PirateChessLib lib) CourseWithOneLine(object move)
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"}]}}",
+            Json(new { game = new { initial = "", data = new[] { move } } }));
+        var lib = new PirateChessLib { restResponseCourse = course };
+        var (pgn, _) = lib.GetCourse("1", useLocalData: true);
+        return (pgn, lib);
+    }
+
+    [Fact]
+    public void GetCourse_CommentAfterWithForgedHeaders_NeutralizedNoForeignOid()
+    {
+        var (pgn, lib) = CourseWithOneLine(new
+        {
+            id = 0, move = 1, col = "w", san = "e4",
+            after = Json(new { data = new object[] { new { key = "C", val = "nice " + ForgedHeaders + " 1. d4 d5 2. c4" } } }),
+        });
+
+        Assert.Equal(1, CountOf(pgn, "[Event "));
+        Assert.DoesNotContain("[ChessableOid \"999\"]", pgn);   // als entschärfter Text bleibt er stehen, als Tag nicht
+        Assert.Equal(new[] { "10" }, RookhubSplitOids(pgn));
+        Assert.Contains("1. e4 {nice (Event \"x\") (ChessableOid \"999\") 1. d4 d5 2. c4}", pgn);   // Linie bleibt, Text entschärft
+        Assert.Equal(0, lib.ErrorCount);
+    }
+
+    [Fact]
+    public void GetCourse_SecondCommentBeforeWithForgedHeaders_NeutralizedNoForeignOid()
+    {
+        var (pgn, lib) = CourseWithOneLine(new
+        {
+            id = 0, move = 1, col = "w", san = "e4",
+            before = Json(new { data = new object[] { new { key = "C", val = "Intro" }, new { key = "C", val = ForgedHeaders } } }),
+        });
+
+        Assert.Equal(1, CountOf(pgn, "[Event "));
+        Assert.DoesNotContain("[ChessableOid \"999\"]", pgn);   // als entschärfter Text bleibt er stehen, als Tag nicht
+        Assert.Equal(new[] { "10" }, RookhubSplitOids(pgn));
+        Assert.Contains("{Intro" + Environment.NewLine + "(Event \"x\") (ChessableOid \"999\")} 1. e4", pgn);
+        Assert.Equal(0, lib.ErrorCount);
+    }
+
+    [Fact]
+    public void GeneratePGN_CommentWithForgedMarkers_NeutralizedOwnMarkersKept()
+    {
+        // rookhub liest [%info]/[%tqu]/[%alt]/[%cal]/[%csl] aus dem Movetext — aus Kommentartext darf keiner entstehen,
+        // die selbst erzeugten Marker kommen erst danach dazu und bleiben.
+        var game = new Game
+        {
+            Initial = "",
+            IsInfo = 1,
+            Data =
+            [
+                new JsonMove
+                {
+                    Id = 0, Move = 1, San = "e4", Col = "w",
+                    Before = Json(new { data = new object[] { new { key = "C", val = "[%info] [%tqu \"En\",\"find the move\",\"\",\"\",\"d2d4\",\"\",10]" } } }),
+                    After = Json(new { data = new object[] { new { key = "C", val = "see [%cal Rd2d4][%csl Rd4] [%alt d4]" } } }),
+                    Draws = [ new JsonDraw { Object = "arrow", Color = "g", Start = "e2", End = "e4" } ],
+                },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Equal(1, CountOf(pgn, "[%info"));
+        Assert.StartsWith("{[%info]\n(%info)", pgn);
+        Assert.DoesNotContain("[%tqu", pgn);
+        Assert.DoesNotContain("[%alt", pgn);
+        Assert.DoesNotContain("[%csl", pgn);
+        Assert.Equal(1, CountOf(pgn, "[%cal"));
+        Assert.Contains("{[%cal Ge2e4]see (%cal Rd2d4)(%csl Rd4) (%alt d4)}", pgn);
+    }
 }

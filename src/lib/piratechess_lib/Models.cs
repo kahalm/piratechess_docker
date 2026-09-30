@@ -479,6 +479,13 @@ namespace piratechess_lib
             // siehe @@StartBracket@@ oben).
             comment = comment.Replace('{', '(').Replace('}', ')');
 
+            // Eckige Klammern ebenso (S2-017): aus Kommentartext dürfen weder PGN-Tags („[Event …]",
+            // „[ChessableOid …]" — rookhub zerlegt an „[Event " und liest die oid je Block) noch Kommandos
+            // („[%tqu", „[%info", „[%alt", „[%cal", „[%csl") entstehen. Mehrere Teile vor einem Zug werden mit
+            // Zeilenumbruch verbunden, „[Event" stünde dann sogar am Zeilenanfang. Die selbst erzeugten Marker
+            // kommen erst in GeneratePGN dazu, NACH dieser Ersetzung, und bleiben unberührt.
+            comment = comment.Replace('[', '(').Replace(']', ')');
+
             // Leerraum wie im Chessable-Export: Chessable schreibt Absätze als „ <br/><br/> ", und entfernte
             // FEN-Marker hinterlassen Leerzeichen am Rand — sonst doppelte Leerzeichen und „Zugfolge }".
             comment = findWhitespace().Replace(comment, " ").Trim();
