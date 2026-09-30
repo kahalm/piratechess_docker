@@ -33,7 +33,7 @@ public class ServiceKeyAuthAttribute : Attribute, IAsyncAuthorizationFilter
         if (string.IsNullOrWhiteSpace(expected) || SecretPlaceholder.IsPlaceholder(expected))
             return KeyState.NotConfigured;
         var header = http.Request.Headers[HeaderName];
-        return header.Count == 1 && FixedTimeEquals(header.ToString(), expected) ? KeyState.Valid : KeyState.Invalid;
+        return header.Count == 1 && KeysEqual(header.ToString(), expected) ? KeyState.Valid : KeyState.Invalid;
     }
 
     public Task OnAuthorizationAsync(AuthorizationFilterContext context)
@@ -53,8 +53,10 @@ public class ServiceKeyAuthAttribute : Attribute, IAsyncAuthorizationFilter
         return Task.CompletedTask;
     }
 
-    /// <summary>Zeitkonstanter String-Vergleich (verhindert Längen-/Inhalts-Leak über Timing).</summary>
-    private static bool FixedTimeEquals(string a, string b)
+    /// <summary>Zeitkonstanter Vergleich (verhindert Längen-/Inhalts-Leak über Timing). SHA-256 bringt beide Werte auf
+    /// gleiche Länge: FixedTimeEquals kehrt bei ungleicher Länge sofort mit false zurück und verriete sonst die
+    /// Key-Länge über die Antwortzeit. Gleiches Rezept wie ApiKeyMiddleware.KeysEqual im Crawler.</summary>
+    internal static bool KeysEqual(string provided, string expected)
         => CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
+            SHA256.HashData(Encoding.UTF8.GetBytes(provided)), SHA256.HashData(Encoding.UTF8.GetBytes(expected)));
 }
