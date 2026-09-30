@@ -194,21 +194,9 @@ public class ExportBackgroundService : BackgroundService
         var lib = new piratechess_lib.PirateChessLib();
         lib.restResponseCourse = fetchedData;
 
-        switch (job.TrainingMode)
-        {
-            case "AllKeyMoves":
-                lib.AllKeyMovesTraining = true;
-                lib.NoTrainingMove = false;
-                break;
-            case "FirstKeyMove":
-                lib.AllKeyMovesTraining = false;
-                lib.NoTrainingMove = false;
-                break;
-            case "None":
-                lib.AllKeyMovesTraining = false;
-                lib.NoTrainingMove = true;
-                break;
-        }
+        // Unbekannter Modus: Bibliotheks-Standard lassen (wie bisher; StartExport lässt ihn gar nicht erst zu).
+        if (TrainingModes.TryParse(job.TrainingMode, out var trainingMode))
+            trainingMode.ApplyTo(lib);
 
         // Progress events still fire during useLocalData PGN generation
         lib.SetChapterCounterEvent(counter =>

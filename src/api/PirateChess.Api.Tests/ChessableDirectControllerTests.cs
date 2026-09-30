@@ -239,6 +239,31 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
+    public async Task Course_NoMode_DefaultsToFirstKeyMove()
+    {
+        // Standard je Route bleibt: course und course/start → FirstKeyMove, course/parse → None.
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "some-valid-jwt", Bid = "1001" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        Assert.Equal("FirstKeyMove", body!.Mode);
+    }
+
+    [Fact]
+    public async Task CourseStart_InvalidMode_Returns400()
+    {
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
+            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "none" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Course_MissingBid_Returns400()
     {
         var client = ClientWithServiceKey();
@@ -608,6 +633,19 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Contains("e4", body.Pgn);
         Assert.DoesNotContain("%tqu", body.Pgn);   // None-Mode → kein Trainingsmarker
         Assert.Contains("[ChessableOid \"10\"]", body.Pgn);   // oid = getList data[].id → für Fortschritts-Zuordnung
+    }
+
+    [Fact]
+    public async Task Parse_NoMode_DefaultsToNone()
+    {
+        var client = ClientWithServiceKey();
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/parse",
+            new { Bid = "1001", Chapters = new[] { new { ChapterJson = ParseChapterJson, Lines = new[] { ParseKeyLineJson } } } });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        Assert.Equal("None", body!.Mode);
+        Assert.DoesNotContain("%tqu", body.Pgn);
     }
 
     [Fact]

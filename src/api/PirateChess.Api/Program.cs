@@ -119,6 +119,8 @@ builder.Services.AddSingleton<CourseFetchJobStore>();
 builder.Services.AddSingleton<RawCourseCache>();
 builder.Services.AddSingleton<RawCourseReconstructor>();
 builder.Services.AddSingleton<RawLineCache>();
+builder.Services.AddSingleton<CourseDataProvider>();
+builder.Services.AddSingleton<BrowserCourseParseService>();
 
 // Un-proxied HttpClient für den gluetun-Control-Server (:8000). Diese Calls
 // dürfen NICHT durch den :8888-Proxy laufen → UseProxy=false. Registriert

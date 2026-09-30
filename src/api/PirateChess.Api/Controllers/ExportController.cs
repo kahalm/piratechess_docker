@@ -6,6 +6,7 @@ using PirateChess.Api.BackgroundJobs;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.DTOs;
 using PirateChess.Api.Models.Entities;
+using PirateChess.Api.Services;
 
 namespace PirateChess.Api.Controllers;
 
@@ -28,8 +29,7 @@ public class ExportController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> StartExport(StartExportRequest request)
     {
-        var validModes = new[] { "AllKeyMoves", "FirstKeyMove", "None" };
-        if (!validModes.Contains(request.TrainingMode))
+        if (!TrainingModes.TryParse(request.TrainingMode, out _))
             return BadRequest(new { message = "Invalid training mode. Use: AllKeyMoves, FirstKeyMove, None" });
 
         var export = new ExportHistory
