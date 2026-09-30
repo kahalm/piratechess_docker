@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage;
 using PirateChess.Api.BackgroundJobs;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.Entities;
@@ -59,6 +61,47 @@ public class RawResponseRetentionTests
 
         Assert.Equal(0, await RawResponseRetentionService.PruneOlderThanAsync(db, now.AddDays(-14), 2000));
         Assert.Equal(1, await db.ChessableRawResponses.CountAsync());
+    }
+
+    /// <summary>Zählt jede aus einem Abfrageergebnis materialisierte <see cref="ChessableRawResponse"/>.</summary>
+    private sealed class RawRowMaterializationCounter : IMaterializationInterceptor
+    {
+        public int Count;
+
+        public object InitializedInstance(MaterializationInterceptionData data, object entity)
+        {
+            if (entity is ChessableRawResponse) Count++;
+            return entity;
+        }
+    }
+
+    // S2-019: die Retention lud je Batch 2 000 ganze Zeilen samt RawJson (bis ~170 KB Base64 je Zeile) in den Heap,
+    // nur um sie zu löschen. Jetzt: nur Ids, gelöscht über Stub-Entities — keine Zeile wird materialisiert.
+    [Fact]
+    public async Task Prune_NeverMaterializesRawRows_OnlyIds()
+    {
+        // Eigene Wurzel: der Kontext mit Interceptor bekommt einen anderen internen Service-Provider und sähe ohne
+        // gemeinsame Wurzel eine leere Datenbank gleichen Namens.
+        var name = Guid.NewGuid().ToString();
+        var root = new InMemoryDatabaseRoot();
+        var old = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        using (var seed = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
+                   .UseInMemoryDatabase(name, root).Options))
+        {
+            for (var i = 0; i < 10; i++) seed.ChessableRawResponses.Add(Row(old));
+            seed.ChessableRawResponses.Add(Row(old.AddDays(30)));   // frisch → bleibt
+            await seed.SaveChangesAsync();
+        }
+
+        var counter = new RawRowMaterializationCounter();
+        using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(name, root).AddInterceptors(counter).Options);
+
+        var deleted = await RawResponseRetentionService.PruneOlderThanAsync(db, old.AddDays(1), 4);
+
+        Assert.Equal(10, deleted);
+        Assert.Equal(0, counter.Count);
+        Assert.Equal(1, await db.ChessableRawResponses.AsNoTracking().CountAsync());
     }
 
     [Fact]

@@ -11,7 +11,7 @@ namespace PirateChess.Api.Services;
 /// Rohdaten wieder auf — OHNE Chessable-Abruf:
 /// <list type="bullet">
 ///   <item>getCourse-Struktur + Kapitel (getList) aus dem Audit-Log <c>ChessableRawResponses</c>
-///     (14-Tage-Retention),</item>
+///     (Retention über <see cref="BackgroundJobs.RawResponseRetentionService"/>, Default 14 Tage),</item>
 ///   <item>Linien-Inhalte aus dem PERMANENTEN Linien-Cache <c>CachedRawLines</c> (Fallback:
 ///     <c>line</c>-Audit).</item>
 /// </list>

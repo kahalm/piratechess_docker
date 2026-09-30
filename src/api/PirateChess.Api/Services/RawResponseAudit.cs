@@ -6,7 +6,8 @@ namespace PirateChess.Api.Services;
 
 /// <summary>
 /// Audit der Chessable-Rohantworten: je curl-Lauf eine Zeile in <c>ChessableRawResponses</c> (Body gzip+Base64,
-/// Login-JWT redigiert). Reines Audit/Debug — ein Fehler beim Speichern bricht den Abruf nie ab.
+/// Login-JWT redigiert). Audit/Debug-Trail und Datengrundlage von <see cref="RawCourseReconstructor"/> — ein Fehler
+/// beim Speichern bricht den Abruf nie ab.
 /// </summary>
 public sealed class RawResponseAudit(IServiceScopeFactory scopeFactory, ILogger<RawResponseAudit> logger)
 {
@@ -24,8 +25,8 @@ public sealed class RawResponseAudit(IServiceScopeFactory scopeFactory, ILogger<
                 Url = url.Length > 500 ? url[..500] : url,
                 StatusCode = statusCode,
                 // gzip+Base64: die Roh-Bodies (Linien Ø ~210 KB, Kapitel Ø ~500 KB) waren bisher
-                // unkomprimiert der mit Abstand größte Tabellen-Anteil. Niemand liest RawJson im Code
-                // (reines Audit/Debug) → Kompression ist verhaltensneutral, ~3× kleiner.
+                // unkomprimiert der mit Abstand größte Tabellen-Anteil, ~3× kleiner. Einziger Leser von
+                // RawJson ist RawCourseReconstructor (entpackt per GzipText.Decompress).
                 // Login-Antworten enthalten ein frisches Chessable-JWT → vor dem Speichern redigieren.
                 RawJson = GzipText.Compress(RedactForStorage(endpoint, body ?? string.Empty)),
                 DurationMs = durationMs,
