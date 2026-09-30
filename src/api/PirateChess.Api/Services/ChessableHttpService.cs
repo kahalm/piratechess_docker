@@ -755,7 +755,7 @@ public class ChessableHttpService : IChessableHttpService
 
             if (exitCode != 0)
             {
-                _logger.LogWarning("curl exited with code {Code}: {Stderr}", exitCode, stderr);
+                _logger.LogWarning(LogWatcherContract.CurlExited + " {Code}: {Stderr}", exitCode, stderr);
                 error = stderr;
                 transientProxyFailure = IsTransientProxyFailure(exitCode, stderr);
             }

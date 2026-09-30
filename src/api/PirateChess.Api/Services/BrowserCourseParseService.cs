@@ -78,7 +78,7 @@ public class BrowserCourseParseService
         mode.ApplyTo(lib);
 
         lib.SetErrorDiagEvent(detail =>
-            _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel beim Browser-Parse (bid {Bid}): {Detail}", request.Bid, detail));
+            _logger.LogWarning("Chessable-Parser " + LogWatcherContract.ParserSkipped + " beim Browser-Parse (bid {Bid}): {Detail}", request.Bid, detail));
 
         string pgn, courseName;
         try

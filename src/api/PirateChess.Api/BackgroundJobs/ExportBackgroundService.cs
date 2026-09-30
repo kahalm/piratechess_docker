@@ -225,7 +225,7 @@ public class ExportBackgroundService : BackgroundService
         });
 
         lib.SetErrorDiagEvent(detail =>
-            _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel (ExportId {ExportId}, bid {Bid}): {Detail}", job.ExportId, job.ChessableBid, detail));
+            _logger.LogWarning("Chessable-Parser " + LogWatcherContract.ParserSkipped + " (ExportId {ExportId}, bid {Bid}): {Detail}", job.ExportId, job.ChessableBid, detail));
 
         var (pgn, courseName) = await Task.Run(() => lib.GetCourse(job.ChessableBid, useLocalData: true), ct);
 

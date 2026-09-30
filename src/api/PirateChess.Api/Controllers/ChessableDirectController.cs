@@ -187,7 +187,7 @@ public class ChessableDirectController : ControllerBase
         mode.ApplyTo(lib);
 
         lib.SetErrorDiagEvent(detail =>
-            _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel (bid {Bid}, uid {Uid}): {Detail}", request.Bid, uid, detail));
+            _logger.LogWarning("Chessable-Parser " + LogWatcherContract.ParserSkipped + " (bid {Bid}, uid {Uid}): {Detail}", request.Bid, uid, detail));
 
         string pgn, courseName;
         try
@@ -502,7 +502,7 @@ public class ChessableDirectController : ControllerBase
             mode.ApplyTo(lib);
 
             lib.SetErrorDiagEvent(detail =>
-                _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel (job {JobId}, bid {Bid}): {Detail}", jobId, bid, detail));
+                _logger.LogWarning("Chessable-Parser " + LogWatcherContract.ParserSkipped + " (job {JobId}, bid {Bid}): {Detail}", jobId, bid, detail));
             ct.ThrowIfCancellationRequested();
             var (pgn, courseName) = await Task.Run(() => lib.GetCourse(bid, useLocalData: true), ct);
             if (lib.ErrorCount > 0)

@@ -94,7 +94,7 @@ public sealed class VpnIpHealth
 
         if (warn)
             _logger.LogWarning(
-                "VPN-IP {Ip} WIEDERHOLT SCHLECHT: Gesamt-Block-Rate {Rate:P0} über {TotReq} Requests ({TotBlk} blockiert, {Bad}/{Stints} schlechte Phasen)",
+                "VPN-IP {Ip} " + LogWatcherContract.IpRepeatedlyBad + ": Gesamt-Block-Rate {Rate:P0} über {TotReq} Requests ({TotBlk} blockiert, {Bad}/{Stints} schlechte Phasen)",
                 ip, (double)totBlk / totReq, totReq, totBlk, badStints, stints);
     }
 

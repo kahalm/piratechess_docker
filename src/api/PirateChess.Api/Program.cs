@@ -173,6 +173,10 @@ builder.Services.AddHostedService<ExportBackgroundService>();
 // Hält die Audit-Tabelle ChessableRawResponses klein (Retention, Default 14 Tage)
 builder.Services.AddHostedService<RawResponseRetentionService>();
 
+// Lebenszeichen „Heartbeat: piratechess-api …" 1×/min → der log-watcher erkennt einen toten/hängenden Dienst
+// an ausbleibenden Heartbeats (wie bei rookhub-api und Crawler), nicht erst am nächsten Nutzer-Import.
+builder.Services.AddHostedService<HeartbeatService>();
+
 // SignalR
 builder.Services.AddSignalR();
 
