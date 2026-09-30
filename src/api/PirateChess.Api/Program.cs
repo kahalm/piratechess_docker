@@ -158,6 +158,8 @@ builder.Services.AddSingleton<VpnIpHealth>();   // Per-IP-Request-/Block-Buchfü
 builder.Services.AddSingleton<IVpnRotationService, VpnRotationService>();
 
 // Chessable HTTP service (curl-impersonate for TLS fingerprint bypass)
+builder.Services.AddSingleton<ICurlRunner, CurlRunner>();
+builder.Services.AddSingleton<RawResponseAudit>();
 builder.Services.AddSingleton<IChessableHttpService, ChessableHttpService>();
 
 // Background export worker

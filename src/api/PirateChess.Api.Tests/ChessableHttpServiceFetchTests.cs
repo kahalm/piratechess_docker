@@ -52,15 +52,26 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         return File.Exists(log) ? File.ReadAllLines(log).Count(l => l.EndsWith(urlPart, StringComparison.Ordinal)) : 0;
     }
 
-    private ChessableHttpService Build(int parallel = 1)
+    /// <param name="proxy">Proxy des VPN-Leases (landet als „--proxy" vorn in der Argumentliste).</param>
+    /// <param name="record">Fake-curl schreibt je Lauf argv (NUL-getrennt wie /proc/&lt;pid&gt;/cmdline) und stdin mit,
+    /// siehe <see cref="Recorded"/>.</param>
+    /// <param name="runner">Statt des Prozess-Runners mit Fake-curl ein In-Memory-<see cref="ICurlRunner"/>.</param>
+    private ChessableHttpService Build(int parallel = 1, string? proxy = null, bool record = false, ICurlRunner? runner = null)
     {
         var script = Path.Combine(_dir, "curl");
+        var recordLines = record ? """
+            n=$(cat "$dir/n" 2>/dev/null || echo 0); echo $((n+1)) > "$dir/n"
+            printf '%s\0' "$@" > "$dir/call-$n.argv"
+            timeout 5 cat > "$dir/call-$n.stdin"
+            """ : "";
         File.WriteAllText(script, $$"""
             #!/bin/bash
             dir='{{_dir}}'
             url="${@: -1}"
             printf '%s\n' "$url" >> "$dir/calls.log"
+            {{recordLines}}
             case "$url" in
+              *authenticate*) f=login ;;
               *getCourse*) f=course ;;
               *getList*) f="chapter-${url##*lid=}" ;;
               *getGame*) f="line-${url##*oid=}" ;;
@@ -78,11 +89,28 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
             ["Chessable:ParallelLineFetches"] = parallel.ToString(),
         }).Build();
         var lineCache = new RawLineCache(_scopeFactory, NullLogger<RawLineCache>.Instance);
-        return new ChessableHttpService(NullLogger<ChessableHttpService>.Instance, _scopeFactory, new NoVpn(), lineCache, config)
+        runner ??= new CurlRunner(NullLogger<CurlRunner>.Instance) { CurlPath = script };
+        var audit = new RawResponseAudit(_scopeFactory, NullLogger<RawResponseAudit>.Instance);
+        return new ChessableHttpService(NullLogger<ChessableHttpService>.Instance, audit, new NoVpn(proxy), lineCache, runner, config)
         {
-            CurlPath = script,
             ProxyRetryDelayMs = 0,
         };
+    }
+
+    /// <summary>argv und stdin jedes aufgezeichneten curl-Laufs, in Aufruf-Reihenfolge (<c>Build(record: true)</c>).</summary>
+    private List<(string[] Argv, string Stdin)> Recorded()
+    {
+        var n = int.Parse(File.ReadAllText(Path.Combine(_dir, "n")).Trim());
+        return Enumerable.Range(0, n).Select(i => (
+            File.ReadAllText(Path.Combine(_dir, $"call-{i}.argv")).TrimEnd('\0').Split('\0'),
+            File.ReadAllText(Path.Combine(_dir, $"call-{i}.stdin")))).ToList();
+    }
+
+    private async Task<List<string>> AuditedEndpointsAsync()
+    {
+        using var scope = _scopeFactory.CreateScope();
+        return await scope.ServiceProvider.GetRequiredService<AppDbContext>().ChessableRawResponses
+            .OrderBy(r => r.Id).Select(r => r.Endpoint).ToListAsync();
     }
 
     private async Task<bool> LineCachedAsync(int oid)
@@ -237,9 +265,112 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         Assert.Equal(4, Calls("bid=777&includeVariations=true"));
     }
 
-    private sealed class NoVpn : IVpnRotationService
+    // Golden-Test (S2-014, vor dem Schnitt aufgezeichnet): argv und stdin JEDES curl-Laufs eines kompletten Kursabrufs,
+    // in Reihenfolge, samt Audit-Zeile je Lauf. Der Umbau (Prozessstart hinter ICurlRunner) darf daran kein Byte ändern:
+    // die Argument-Reihenfolge ist der TLS-/Header-Fingerprint, der Proxy steht vorn, der Bearer nur auf stdin.
+    [Fact]
+    public async Task Fetch_CompleteCourse_CurlArgvAndStdinSequence_IsGolden()
     {
-        private static VpnLease Lease() => new(null, _ => { });
+        if (!OperatingSystem.IsLinux()) return;
+        const string proxy = "http://gluetun:8888";
+        const string bearer = "golden.bearer.token";
+
+        var (data, error) = await Build(proxy: proxy, record: true).FetchCourseDataAsync(bearer, "1", "777");
+
+        Assert.Null(error);
+        Assert.Equal(2, data!.ChapterList.Count);
+        const string api = "https://www.chessable.com/api/v1/";
+        var urls = new[]
+        {
+            api + "getCourse?uid=1&bid=777&includeVariations=true",
+            api + "getList?uid=1&bid=777&lid=1",
+            api + "getGame?lng=en&uid=1&oid=11",
+            api + "getGame?lng=en&uid=1&oid=12",
+            api + "getList?uid=1&bid=777&lid=2",
+            api + "getGame?lng=en&uid=1&oid=21",
+        };
+        var recorded = Recorded();
+        Assert.Equal(urls.Length, recorded.Count);
+        for (int i = 0; i < urls.Length; i++)
+        {
+            Assert.Equal(["--proxy", proxy, .. ChessableHttpServiceTests.GoldenGetArgv(urls[i], "20")], recorded[i].Argv);
+            Assert.Equal($"authorization: Bearer {bearer}\n", recorded[i].Stdin);
+        }
+        Assert.Equal(["course", "chapter", "line", "line", "chapter", "line"], await AuditedEndpointsAsync());
+    }
+
+    // Golden-Test des Login-POST: Body geht über stdin („-d @-"), der Proxy steht vorn, das frische JWT der Antwort
+    // wird im Audit redigiert.
+    [Fact]
+    public async Task Login_CurlArgvAndStdin_IsGolden_JwtRedactedInAudit()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        const string proxy = "http://gluetun:8888";
+        Respond("login", "{\"jwt\":\"fresh.login.jwt\"}");
+
+        var (jwt, error) = await Build(proxy: proxy, record: true).LoginAsync("a@b.c", "pw");
+
+        Assert.Null(error);
+        Assert.Equal("fresh.login.jwt", jwt);
+        const string url = "https://www.chessable.com/api/v1/authenticate";
+        var recorded = Assert.Single(Recorded());
+        Assert.Equal(["--proxy", proxy, .. ChessableHttpService.BuildPostArgs(url)], recorded.Argv);
+        var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA512.HashData("pw"u8));
+        Assert.Equal("{\"method\":\"email\",\"credentials\":{\"email\":\"a@b.c\",\"password\":\"" + hash
+            + "\"},\"providerData\":null,\"mode\":\"login\",\"checkoutData\":null,\"preferredLanguage\":\"en\","
+            + "\"newsletterChecked\":false}", recorded.Stdin);
+        using var scope = _scopeFactory.CreateScope();
+        var row = await scope.ServiceProvider.GetRequiredService<AppDbContext>().ChessableRawResponses.SingleAsync();
+        Assert.Equal("login", row.Endpoint);
+        Assert.Equal("{\"jwt\":\"[redacted]\"}", GzipText.Decompress(row.RawJson));
+    }
+
+    // S2-014: der Abruf ist ohne echtes curl testbar — ICurlRunner ist die Naht zwischen Orchestrierung und Prozess.
+    // Hier (plattformunabhängig, kein Prozess): der Proxy meldet beim ersten Kurs-Abruf 503 (curl 56), der Retry läuft,
+    // danach kommt der ganze Kurs; der Runner sieht je Lauf dieselben Argumente, den Proxy und den Bearer auf stdin.
+    [Fact]
+    public async Task Fetch_WithFakeCurlRunner_NoProcess_Proxy503OnCourseIsRetried()
+    {
+        const string proxy = "http://gluetun:8888";
+        var courseCalls = 0;
+        var runner = new FakeCurlRunner(url =>
+        {
+            if (url.Contains("getCourse") && ++courseCalls == 1)
+                return new CurlResult(56, "", "curl: (56) CONNECT tunnel failed, response 503");
+            if (url.Contains("getCourse")) return new CurlResult(0, "{\"course\":{\"data\":[{\"id\":1,\"total\":1}]}}", "");
+            if (url.Contains("getList")) return new CurlResult(0, "{\"list\":{\"name\":\"K1\",\"data\":[{\"id\":11}]}}", "");
+            return new CurlResult(0, ValidLine, "");
+        });
+
+        var (data, error) = await Build(proxy: proxy, runner: runner).FetchCourseDataAsync("fake.bearer", "1", "777");
+
+        Assert.Null(error);
+        Assert.Equal(ValidLine, Assert.Single(Assert.Single(data!.ChapterList).ResponseLineList).LineJsonContent);
+        Assert.Equal(4, runner.Calls.Count);                  // Kurs (503), Kurs, Kapitel, Linie
+        Assert.All(runner.Calls, c =>
+        {
+            Assert.Equal(ChessableHttpServiceTests.GoldenGetArgv(c.Args[^1], "20"), c.Args);
+            Assert.Equal(proxy, c.ProxyUrl);
+            Assert.Equal("authorization: Bearer fake.bearer\n", c.Stdin);
+        });
+        Assert.Equal(["course", "course", "chapter", "line"], await AuditedEndpointsAsync());
+    }
+
+    /// <summary>In-Memory-<see cref="ICurlRunner"/>: antwortet je URL (letztes Argument) und zeichnet jeden Lauf auf.</summary>
+    private sealed class FakeCurlRunner(Func<string, CurlResult> respond) : ICurlRunner
+    {
+        public List<(List<string> Args, string? Stdin, string? ProxyUrl)> Calls { get; } = [];
+
+        public Task<CurlResult> RunAsync(IReadOnlyList<string> args, string? stdin, string? proxyUrl, CancellationToken ct)
+        {
+            lock (Calls) Calls.Add((args.ToList(), stdin, proxyUrl));
+            return Task.FromResult(respond(args[^1]));
+        }
+    }
+
+    private sealed class NoVpn(string? proxy = null) : IVpnRotationService
+    {
+        private VpnLease Lease() => new(proxy, _ => { });
         public Task<VpnLease> AcquireAsync(CancellationToken ct = default) => Task.FromResult(Lease());
         public Task<VpnLease> AcquireAsync(string? chessableUid, CancellationToken ct = default) => Task.FromResult(Lease());
         public Task<VpnLease> AcquireSpecificAsync(int index, CancellationToken ct = default) => Task.FromResult(Lease());

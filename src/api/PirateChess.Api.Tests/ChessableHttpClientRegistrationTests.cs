@@ -32,4 +32,13 @@ public class ChessableHttpClientRegistrationTests : IClassFixture<TestWebApplica
         Assert.NotEmpty(options.HttpClientActions);
         Assert.NotEmpty(options.HttpMessageHandlerBuilderActions);
     }
+
+    // S2-014: der echte ChessableHttpService braucht den ICurlRunner aus Program.cs. Die Test-Factory ersetzt den
+    // Dienst durch ein Fake, darum hier aus dem echten Container bauen: fehlt die Registrierung, wirft das.
+    [Fact]
+    public void ChessableHttpService_resolves_with_the_registered_curl_runner()
+    {
+        Assert.IsType<CurlRunner>(_factory.Services.GetRequiredService<ICurlRunner>());
+        Assert.NotNull(ActivatorUtilities.CreateInstance<ChessableHttpService>(_factory.Services));
+    }
 }

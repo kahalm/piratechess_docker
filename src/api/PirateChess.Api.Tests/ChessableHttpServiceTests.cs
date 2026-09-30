@@ -220,8 +220,13 @@ public class ChessableHttpServiceTests
     // Request auf der Leitung ist byte-gleich (mit curl-impersonate 0.6.1 / curl 8.1.1 geprüft).
     [Fact]
     public void BuildGetArgs_GoldenOrder()
-    {
-        var expected = new List<string> { "-s", "-S", "--connect-timeout", "30", "--max-time", "17",
+        => Assert.Equal(GoldenGetArgv("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2", "17"),
+            ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2", 17));
+
+    /// <summary>Erwartete GET-Argumentliste als Literal (unabhängig vom Produktionscode); auch der Golden-Test des
+    /// kompletten Kursabrufs (ChessableHttpServiceFetchTests) vergleicht gegen sie.</summary>
+    internal static List<string> GoldenGetArgv(string url, string maxTimeSec)
+        => new() { "-s", "-S", "--connect-timeout", "30", "--max-time", maxTimeSec,
             "--ciphers", "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256,"
                 + "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES256-GCM-SHA384,"
                 + "ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-CHACHA20-POLY1305,ECDHE-RSA-CHACHA20-POLY1305,"
@@ -245,10 +250,7 @@ public class ChessableHttpServiceTests
             "-H", "te: trailers",
             "-H", "pragma: no-cache",
             "-H", "cache-control: no-cache",
-            "https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2" };
-
-        Assert.Equal(expected, ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2", 17));
-    }
+            url };
 
     // Ein Zeilenumbruch im (vom Aufrufer gelieferten) Bearer darf in der Header-Datei keinen zweiten Header
     // erzeugen: curl liest jede Zeile als eigenen Header.

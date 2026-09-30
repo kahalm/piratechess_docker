@@ -2,27 +2,20 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
-using Microsoft.EntityFrameworkCore;
 using Serilog.Context;
 using piratechess_lib;
-using PirateChess.Api.Data;
-using PirateChess.Api.Models.Entities;
 
 namespace PirateChess.Api.Services;
 
 public class ChessableHttpService : IChessableHttpService
 {
     private readonly ILogger<ChessableHttpService> _logger;
-    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly RawResponseAudit _audit;
     private readonly IVpnRotationService _vpn;
     // Hinweis: Der zu nutzende Proxy kommt jetzt pro Request aus dem VPN-Lease (Multi-Tunnel),
     // nicht mehr aus einem festen Feld.
     private readonly RawLineCache _lineCache;
-    private readonly string _curlPath;
-
-    /// <summary>Pfad der curl-Binary. Nur Tests setzen ihn (Fake-curl, das Chessable-Antworten ausspielt).</summary>
-    internal string CurlPath { get => _curlPath; init => _curlPath = value; }
+    private readonly ICurlRunner _curl;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     // Der Kurs-Struktur-Abruf hatte bisher keinen Retry. Direkt nach einer VPN-
@@ -88,19 +81,17 @@ public class ChessableHttpService : IChessableHttpService
 
     public ChessableHttpService(
         ILogger<ChessableHttpService> logger,
-        IServiceScopeFactory scopeFactory,
+        RawResponseAudit audit,
         IVpnRotationService vpn,
         RawLineCache lineCache,
+        ICurlRunner curl,
         IConfiguration configuration)
     {
         _logger = logger;
-        _scopeFactory = scopeFactory;
+        _audit = audit;
         _vpn = vpn;
         _lineCache = lineCache;
-
-        // Use curl-impersonate-chrome binary directly (NOT the wrapper scripts
-        // which add their own browser headers causing duplicates)
-        _curlPath = "/usr/local/bin/curl-impersonate-chrome";
+        _curl = curl;
 
         // Speed-Stellschrauben (per ENV justierbar). Der Block ist requests-pro-IP-getrieben, NICHT
         // timing-getrieben (Prod-Messung) → der Inter-Request-Delay dient kaum der Block-Vermeidung;
@@ -748,28 +739,6 @@ public class ChessableHttpService : IChessableHttpService
 
     private async Task<string> RunCurlAsync(List<string> args, string? stdinBody, string url, string endpoint, string? chessableUid, string? proxyUrl, CancellationToken ct)
     {
-        _logger.LogDebug("curl: {Path} (proxy: {Proxy})", _curlPath, proxyUrl ?? "none");
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = _curlPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            RedirectStandardInput = stdinBody is not null,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        // ArgumentList → jedes Token wird einzeln/escaped übergeben (keine Shell, keine Arg-Injektion).
-        // curl-impersonate honoriert in unserem Setup keine HTTP(S)_PROXY-Env automatisch
-        // → Proxy explizit als --proxy mitgeben, damit die Calls über gluetun/VPN laufen.
-        if (!string.IsNullOrEmpty(proxyUrl))
-        {
-            psi.ArgumentList.Add("--proxy");
-            psi.ArgumentList.Add(proxyUrl);
-        }
-        foreach (var arg in args)
-            psi.ArgumentList.Add(arg);
-
         var sw = Stopwatch.StartNew();
         string stdout = "";
         int exitCode = -1;
@@ -778,46 +747,11 @@ public class ChessableHttpService : IChessableHttpService
 
         try
         {
-            using var process = Process.Start(psi)
-                ?? throw new InvalidOperationException($"Failed to start {_curlPath}");
-
-            // Bei Cancellation (z. B. Shutdown) den curl-Prozess aktiv beenden — Process.Dispose
-            // killt ihn NICHT, sonst bliebe er als Waise hängen und WaitForExitAsync würde erst
-            // mit seinem Ende zurückkehren.
-            using var killReg = ct.Register(() =>
-            {
-                try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
-                catch { /* Prozess bereits beendet / Race — egal */ }
-            });
-
-            if (stdinBody is not null)
-            {
-                try
-                {
-                    await process.StandardInput.WriteAsync(stdinBody.AsMemory(), ct);
-                    process.StandardInput.Close();
-                }
-                catch (IOException)
-                {
-                    // curl hat stdin nicht gelesen, weil es schon beendet ist (Broken pipe). Den Ausgang
-                    // sagen Exit-Code und stderr unten; eine IOException hier würde ihn verdecken (z. B.
-                    // den Proxy-503, auf den der Aufrufer gezielt einen Retry macht).
-                    try { process.StandardInput.Dispose(); } catch (IOException) { /* Pipe trotzdem schließen */ }
-                }
-            }
-
-            // BEIDE Pipes gleichzeitig leeren: stdout ist hier riesig (Linien Ø ~210 KB, Kapitel ~500 KB).
-            // Würde stdout erst vollständig gelesen, bevor stderr drankommt, blockiert curl beim Schreiben
-            // auf eine volle stderr-Pipe (OS-Puffer ~64 KB), während wir auf stdout warten → Deadlock,
-            // den nur --max-time auflöst. Daher parallel lesen, dann auf Exit warten.
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-            var stderrTask = process.StandardError.ReadToEndAsync(ct);
-            await Task.WhenAll(stdoutTask, stderrTask);
-            stdout = await stdoutTask;
-            var stderr = await stderrTask;
-
-            await process.WaitForExitAsync(ct);
-            exitCode = process.ExitCode;
+            // Prozess (Proxy-Argument, stdin, beide Pipes, Kill bei Abbruch) steckt im ICurlRunner.
+            var run = await _curl.RunAsync(args, stdinBody, proxyUrl, ct);
+            stdout = run.Stdout;
+            var stderr = run.Stderr;
+            exitCode = run.ExitCode;
 
             if (exitCode != 0)
             {
@@ -841,7 +775,7 @@ public class ChessableHttpService : IChessableHttpService
         finally
         {
             sw.Stop();
-            await PersistRawResponseAsync(endpoint, chessableUid, url, exitCode, stdout, (int)sw.ElapsedMilliseconds, error, ct);
+            await _audit.PersistAsync(endpoint, chessableUid, url, exitCode, stdout, (int)sw.ElapsedMilliseconds, error, ct);
         }
 
         // Nach dem Persistieren werfen, damit der Rohlog erhalten bleibt. Der Aufrufer
@@ -890,47 +824,6 @@ public class ChessableHttpService : IChessableHttpService
         return error.Contains("CONNECT tunnel failed", StringComparison.OrdinalIgnoreCase)
             || error.Contains("response 503", StringComparison.OrdinalIgnoreCase)
             || error.Contains("HTTP code 503 from proxy", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private async Task PersistRawResponseAsync(string endpoint, string? chessableUid, string url,
-        int statusCode, string body, int durationMs, string? errorMessage, CancellationToken ct)
-    {
-        try
-        {
-            using var scope = _scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            db.ChessableRawResponses.Add(new ChessableRawResponse
-            {
-                Endpoint = endpoint,
-                ChessableUid = chessableUid,
-                Url = url.Length > 500 ? url[..500] : url,
-                StatusCode = statusCode,
-                // gzip+Base64: die Roh-Bodies (Linien Ø ~210 KB, Kapitel Ø ~500 KB) waren bisher
-                // unkomprimiert der mit Abstand größte Tabellen-Anteil. Niemand liest RawJson im Code
-                // (reines Audit/Debug) → Kompression ist verhaltensneutral, ~3× kleiner.
-                // Login-Antworten enthalten ein frisches Chessable-JWT → vor dem Speichern redigieren.
-                RawJson = GzipText.Compress(RedactForStorage(endpoint, body ?? string.Empty)),
-                DurationMs = durationMs,
-                ErrorMessage = errorMessage,
-                RequestedAt = DateTime.UtcNow
-            });
-            await db.SaveChangesAsync(ct);
-        }
-        catch (Exception ex)
-        {
-            // Logging-Persistenz darf den eigentlichen Call nicht killen.
-            _logger.LogWarning(ex, "Failed to persist ChessableRawResponse for {Endpoint}", endpoint);
-        }
-    }
-
-    /// <summary>Redigiert sensible Werte aus einem Roh-Body vor dem Audit-Speichern. Aktuell: das
-    /// <c>jwt</c>-Feld der Login-Antwort (frisches Chessable-Token) → <c>[redacted]</c>. Andere
-    /// Endpunkte bleiben unverändert (reine Kurs-/Linien-Daten, kein Geheimnis).</summary>
-    internal static string RedactForStorage(string endpoint, string body)
-    {
-        if (endpoint != "login" || string.IsNullOrEmpty(body)) return body;
-        // "jwt":"<token>" → "jwt":"[redacted]" (tolerant ggü. Whitespace; Token enthält keine ").
-        return Regex.Replace(body, "(\"jwt\"\\s*:\\s*\")[^\"]*(\")", "$1[redacted]$2");
     }
 
     private static void AddHeader(List<string> args, string header)
