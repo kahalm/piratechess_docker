@@ -8,63 +8,6 @@ using System.Text.RegularExpressions;
 namespace piratechess_lib
 {
 
-    public class ResponseCourse
-    {
-        public Course Course { get; set; } = new Course();
-    }
-    public class Course
-    {
-        public List<Chapter> Data { get; set; } = [];
-    }
-    public class Chapter
-    {
-        public int Id { get; set; }
-        /// <summary>Anzahl Varianten des Kapitels (Chessable-Feld "total"). Nur gefüllt, wenn der
-        /// getCourse-Abruf mit includeVariations=true erfolgte; sonst 0.</summary>
-        public int Total { get; set; }
-        /// <summary>Varianten des Kapitels (oid/Typ) — nur bei includeVariations=true. Summe der
-        /// Counts über alle Kapitel = Gesamt-Linienzahl des Kurses (= Zahl der getGame-Abrufe).</summary>
-        public List<ChapterVariation> Variations { get; set; } = [];
-    }
-    public class ChapterVariation
-    {
-        public long Oid { get; set; }
-        public string Type { get; set; } = string.Empty;
-    }
-    public class ResponseLine
-    {
-        public Game Game { get; set; } = new Game();
-    }
-    public class ResponseChapter
-    {
-        public ResponseList List { get; set; } = new ResponseList();
-    }
-    public class ResponseList
-    {
-        public string Name { get; set; } = string.Empty;
-        public List<Line> Data { get; set; } = [];
-        public string Title { get; set; } = string.Empty;
-    }
-
-    public class ResponseMove
-    {
-        public string Before { get; set; } = string.Empty;
-        public string After { get; set; } = string.Empty;
-        public List<JsonMoveItemList> Data { get; set; } = [];
-    }
-    public class Line
-    {
-        public int Id { get; set; }
-        public string Name { get; set; } = string.Empty;
-    }
-    /// <summary>Pro Vollzug (index = Vollzugnummer ab Linienbeginn) die von Chessable geduldeten
-    /// Züge je Seite. Enthält den Hauptzug PLUS die akzeptierten Alternativen (gemeinsame Stellung).
-    /// W/B können null sein, wenn die Seite an diesem Zug nicht trainiert wird.</summary>
-    public class SoftFailEntry
-    {
-        public List<string>? W { get; set; }
-        public List<string>? B { get; set; }
-    }
     public class Game
     {
         public bool Owned { get; set; }
@@ -479,39 +422,6 @@ namespace piratechess_lib
             _ => 'P'
         };
     }
-    public class JsonMove
-    {
-        public int Id { get; set; }
-        public int Move { get; set; }
-        /// <summary>Ziehende Seite: "w" oder "b" (Chessable-Feld „col").</summary>
-        public string Col { get; set; } = string.Empty;
-        public string San { get; set; } = string.Empty;
-        public string After { get; set; } = string.Empty;
-        public string Before { get; set; } = string.Empty;
-        public string CommentAfter { get; internal set; } = string.Empty;
-        public string CommentBefore { get; internal set; } = string.Empty;
-        public string CommentVariations { get; internal set; } = string.Empty;
-
-        public bool IsKey { get; set; }
-        public List<JsonDraw> Draws { get; set; } = [];
-    }
-
-    public class JsonDraw
-    {
-        public string Object { get; set; } = string.Empty;
-        public string Start { get; set; } = string.Empty;
-        public string End { get; set; } = string.Empty;
-        public string Color { get; set; } = string.Empty;
-        public string Move { get; set; } = string.Empty;
-        public string Index { get; set; } = string.Empty;
-    }
-
-    public class JsonMoveItem
-    {
-        public string State { get; set; } = string.Empty;
-        public string Key { get; set; } = string.Empty;
-        public string Val { get; set; } = string.Empty;
-    }
 
     public partial class JsonMoveItemList
     {
@@ -856,51 +766,5 @@ namespace piratechess_lib
         [GeneratedRegex(@"@@StartFEN@@(.+?)@@EndFEN@@")]
         private static partial Regex findFenTags();
 
-    }
-
-    public partial class ResponseLogin
-    {
-        public string Jwt { get; set; } = string.Empty;
-
-        public int Uid
-        {
-            get
-            {
-                return JwtHelper.ExtractUidFromToken(Jwt);
-            }
-        }
-    }
-
-    public partial class ResponseChapterList
-    {
-        public JsonHomeData HomeData { get; set; } = new();
-    }
-
-    public class JsonHomeData
-    {
-        public List<JsonBook> BooksList { get; set; } = [];
-    }
-
-    public class JsonBook
-    {
-        public int Bid { get; set; }
-        public string Name { get; set; } = string.Empty;
-    }
-    public class RestResponseLine
-    {
-        /// <summary>Globale Chessable-Linien-ID (oid). Schlüssel für den per-Linie-Cache
-        /// (CachedRawLines) → erlaubt es, im Kurs-Cache nur die Referenz statt des Inhalts abzulegen.</summary>
-        public int Oid { get; set; }
-        public string? LineJsonContent { get; set; }
-    }
-    public class RestResponseChapter
-    {
-        public string? ChapterJsonContent { get; set; }
-        public List<RestResponseLine> ResponseLineList { get; set; } = [];
-    } 
-    public class RestResponseCourse
-    {
-        public string? CourseJsonContent { get; set; } 
-        public List<RestResponseChapter> ChapterList { get; set; } = [];
     }
 }
