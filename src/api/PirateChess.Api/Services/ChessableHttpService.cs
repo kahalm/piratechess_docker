@@ -717,8 +717,10 @@ public class ChessableHttpService : IChessableHttpService
         var uname = ChessableJwt.TryExtractUname(bearer);
         using IDisposable? userScope = uname is null ? null : LogContext.PushProperty("ChessableUser", uname);
 
-        var args = BuildGetArgs(url, bearer, _requestMaxTimeSec);
-        var result = await RunCurlAsync(args, null, url, endpoint, chessableUid, lease.ProxyUrl, ct);
+        // Bearer über stdin statt als argv-Token (S2-006): die Argumentliste steht für jedes lokale Konto in
+        // /proc/<pid>/cmdline, stdin nicht.
+        var args = BuildGetArgs(url, _requestMaxTimeSec);
+        var result = await RunCurlAsync(args, BuildGetHeaderStdin(bearer), url, endpoint, chessableUid, lease.ProxyUrl, ct);
 
         // IP-Soft-Block (leeres "{}"/leere Antwort trotz Transport-Erfolg): diese Ausgangs-IP ist
         // verbrannt → sofort retiren (Tunnel rotiert im Hintergrund, Pool wechselt auf den nächsten,
@@ -790,8 +792,18 @@ public class ChessableHttpService : IChessableHttpService
 
             if (stdinBody is not null)
             {
-                await process.StandardInput.WriteAsync(stdinBody.AsMemory(), ct);
-                process.StandardInput.Close();
+                try
+                {
+                    await process.StandardInput.WriteAsync(stdinBody.AsMemory(), ct);
+                    process.StandardInput.Close();
+                }
+                catch (IOException)
+                {
+                    // curl hat stdin nicht gelesen, weil es schon beendet ist (Broken pipe). Den Ausgang
+                    // sagen Exit-Code und stderr unten; eine IOException hier würde ihn verdecken (z. B.
+                    // den Proxy-503, auf den der Aufrufer gezielt einen Retry macht).
+                    try { process.StandardInput.Dispose(); } catch (IOException) { /* Pipe trotzdem schließen */ }
+                }
             }
 
             // BEIDE Pipes gleichzeitig leeren: stdout ist hier riesig (Linien Ø ~210 KB, Kapitel ~500 KB).
@@ -929,12 +941,15 @@ public class ChessableHttpService : IChessableHttpService
 
     /// <summary>
     /// Baut die curl-Argumente als EINZELNE argv-Tokens (für <see cref="ProcessStartInfo.ArgumentList"/>).
-    /// Jeder Wert — inkl. URL (mit user-naher bid) und Bearer — ist ein eigenständiges Argument; .NET
+    /// Jeder Wert — inkl. URL (mit user-naher bid) — ist ein eigenständiges Argument; .NET
     /// escaped sie pro-Token. Dadurch kann KEIN Eingabewert curl-Flags injizieren (vorher floss die URL
     /// als <c>"{url}"</c> in einen Args-String → ein <c>"</c> in der bid konnte z.B. <c>-o</c>/<c>--config</c>
     /// einschleusen und Dateien lesen/schreiben).
+    /// Der Bearer steht NICHT in den Argumenten (sonst für jedes lokale Konto in <c>/proc/&lt;pid&gt;/cmdline</c>
+    /// lesbar): an seiner Stelle liest <c>-H @-</c> den Authorization-Header aus stdin
+    /// (<see cref="BuildGetHeaderStdin"/>). curl fügt ihn genau dort ein → Header-Reihenfolge unverändert.
     /// </summary>
-    public static List<string> BuildGetArgs(string url, string bearer, int maxTimeSec = 20)
+    public static List<string> BuildGetArgs(string url, int maxTimeSec = 20)
     {
         var args = new List<string> { "-s", "-S", "--connect-timeout", CurlConnectTimeoutSec.ToString(),
             "--max-time", maxTimeSec.ToString() };
@@ -946,7 +961,7 @@ public class ChessableHttpService : IChessableHttpService
         AddHeader(args, "x-os-name: Firefox");
         AddHeader(args, "x-os-version: 138");
         AddHeader(args, "x-device-model: Windows");
-        AddHeader(args, $"authorization: Bearer {bearer}");
+        AddHeader(args, "@-"); // authorization: Bearer … aus stdin (BuildGetHeaderStdin)
         AddHeader(args, "alt-used: www.chessable.com");
         AddHeader(args, "connection: keep-alive");
         AddHeader(args, "sec-fetch-dest: empty");
@@ -959,6 +974,11 @@ public class ChessableHttpService : IChessableHttpService
         args.Add(url);
         return args;
     }
+
+    /// <summary>stdin-Text zu <see cref="BuildGetArgs"/> (<c>-H @-</c>): genau eine Header-Zeile mit dem Bearer.
+    /// CR/LF werden entfernt, weil curl jede Zeile der Header-Datei als eigenen Header liest.</summary>
+    public static string BuildGetHeaderStdin(string bearer)
+        => $"authorization: Bearer {bearer.Replace("\r", "").Replace("\n", "")}\n";
 
     /// <summary>Wie <see cref="BuildGetArgs"/>, für POST (Body via stdin, <c>-d @-</c>).</summary>
     public static List<string> BuildPostArgs(string url)

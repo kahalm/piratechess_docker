@@ -186,6 +186,57 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         Assert.False(RawCourseCache.IsComplete(data));
     }
 
+    // S2-006: Der Bearer stand als „-H authorization: Bearer …" in der Argumentliste des curl-Prozesses und damit
+    // in /proc/<pid>/cmdline (für jedes lokale Konto des Docker-Hosts lesbar). Jetzt geht er über stdin („-H @-").
+    [Fact]
+    public async Task CurlGet_BearerNotInProcessArguments_ButOnStdin()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var service = Build();
+        // Fake-curl durch eines ersetzen, das argv (NUL-getrennt wie /proc/<pid>/cmdline) und stdin mitschreibt.
+        File.WriteAllText(Path.Combine(_dir, "curl"), $$"""
+            #!/bin/bash
+            dir='{{_dir}}'
+            printf '%s\0' "$@" > "$dir/argv.bin"
+            timeout 5 cat > "$dir/stdin.txt"
+            printf '%s' '{{ValidLine}}'
+            exit 0
+            """.Replace("\r\n", "\n"));
+        const string bearer = "eyJhbGciOiJIUzI1NiJ9.eyJ1aWQiOjF9.S2006-SECRET-SIGNATURE";
+
+        var (ok, _, _, error, _) = await service.DebugFetchLineAsync(bearer, "1", 42);
+
+        Assert.Null(error);
+        Assert.True(ok);
+        var argv = File.ReadAllText(Path.Combine(_dir, "argv.bin")).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        Assert.DoesNotContain(argv, a => a.Contains("S2006-SECRET-SIGNATURE", StringComparison.Ordinal));
+        Assert.DoesNotContain(argv, a => a.Contains("authorization", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=42", argv[^1]);
+        Assert.Equal($"authorization: Bearer {bearer}\n", File.ReadAllText(Path.Combine(_dir, "stdin.txt")));
+    }
+
+    // Seit S2-006 schreibt jeder GET auf stdin. Beendet sich curl, ohne stdin zu lesen (hier: Proxy-503), darf der
+    // Broken pipe beim Schreiben den Ausgang nicht verdecken: der Proxy-Fehler muss weiter den Retry auslösen.
+    [Fact]
+    public async Task CurlGet_CurlExitsWithoutReadingStdin_ProxyFailureStillRetried()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var service = Build();
+        File.WriteAllText(Path.Combine(_dir, "curl"), $$"""
+            #!/bin/bash
+            printf '%s\n' "${@: -1}" >> '{{_dir}}/calls.log'
+            echo 'curl: (56) CONNECT tunnel failed, response 503' >&2
+            exit 56
+            """.Replace("\r\n", "\n"));
+        var hugeBearer = new string('x', 256 * 1024);   // größer als der Pipe-Puffer → Schreiben scheitert sicher
+
+        var (data, error) = await service.FetchCourseDataAsync(hugeBearer, "1", "777");
+
+        Assert.Null(data);
+        Assert.Contains("proxy tunnel unavailable", error);
+        Assert.Equal(4, Calls("bid=777&includeVariations=true"));
+    }
+
     private sealed class NoVpn : IVpnRotationService
     {
         private static VpnLease Lease() => new(null, _ => { });

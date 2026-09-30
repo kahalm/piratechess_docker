@@ -190,7 +190,7 @@ public class ChessableHttpServiceTests
         // Eine bid mit  " -o /tmp/pwn --config /etc/passwd  hätte vorher curl-Flags eingeschleust
         // (Datei schreiben/lesen). Als ArgumentList-Token ist die KOMPLETTE URL genau ein Argument.
         var evil = "https://www.chessable.com/api/v1/getCourse?uid=1&bid=1\" -o /tmp/pwn --config /etc/passwd";
-        var args = ChessableHttpService.BuildGetArgs(evil, "tok");
+        var args = ChessableHttpService.BuildGetArgs(evil);
 
         Assert.Equal(evil, args[^1]);                       // ganze bösartige URL = genau ein, letztes Token
         Assert.Single(args, a => a == evil);
@@ -199,14 +199,65 @@ public class ChessableHttpServiceTests
         Assert.DoesNotContain("/tmp/pwn", args);
     }
 
+    // --- Bearer nicht in argv (S2-006: /proc/<pid>/cmdline ist für jedes lokale Konto lesbar) ---
+
     [Fact]
-    public void BuildGetArgs_BearerAndUrl_AreDistinctSingleTokens()
+    public void BuildGetArgs_ContainsNoBearer_AuthorizationHeaderComesFromStdin()
     {
-        var args = ChessableHttpService.BuildGetArgs("https://x/y", "my.jwt.token");
+        var args = ChessableHttpService.BuildGetArgs("https://x/y");
         Assert.Equal("-s", args[0]);
-        Assert.Contains("-H", args);
-        Assert.Contains("authorization: Bearer my.jwt.token", args); // Header-Wert = ein Token (mit Leerzeichen)
+        Assert.DoesNotContain(args, a => a.Contains("Bearer", StringComparison.OrdinalIgnoreCase)
+                                         || a.Contains("authorization", StringComparison.OrdinalIgnoreCase));
+        var i = args.IndexOf("@-");
+        Assert.True(i > 0, "-H @- fehlt");
+        Assert.Equal("-H", args[i - 1]);                              // Header-Datei = stdin
         Assert.Equal("https://x/y", args[^1]);                       // URL zuletzt, ein Token
+        Assert.Equal("authorization: Bearer my.jwt.token\n", ChessableHttpService.BuildGetHeaderStdin("my.jwt.token"));
+    }
+
+    // Golden-Test: Reihenfolge der curl-Argumente (TLS-/Header-Fingerprint). „-H @-" steht exakt dort, wo
+    // vorher „-H authorization: Bearer …" stand; curl liest die Header-Datei an dieser Stelle ein, der
+    // Request auf der Leitung ist byte-gleich (mit curl-impersonate 0.6.1 / curl 8.1.1 geprüft).
+    [Fact]
+    public void BuildGetArgs_GoldenOrder()
+    {
+        var expected = new List<string> { "-s", "-S", "--connect-timeout", "30", "--max-time", "17",
+            "--ciphers", "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256,"
+                + "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES256-GCM-SHA384,"
+                + "ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-CHACHA20-POLY1305,ECDHE-RSA-CHACHA20-POLY1305,"
+                + "ECDHE-RSA-AES128-SHA,ECDHE-RSA-AES256-SHA,AES128-GCM-SHA256,AES256-GCM-SHA384,AES128-SHA,AES256-SHA",
+            "--http2", "--http2-no-server-push", "--compressed", "--tlsv1.2", "--alps", "--tls-permute-extensions",
+            "--cert-compression", "brotli",
+            "-H", "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0",
+            "-H", "accept: application/json, text/plain, */*",
+            "-H", "accept-language: en",
+            "-H", "platform: Web",
+            "-H", "x-os-name: Firefox",
+            "-H", "x-os-version: 138",
+            "-H", "x-device-model: Windows",
+            "-H", "@-",
+            "-H", "alt-used: www.chessable.com",
+            "-H", "connection: keep-alive",
+            "-H", "sec-fetch-dest: empty",
+            "-H", "sec-fetch-mode: cors",
+            "-H", "sec-fetch-site: same-origin",
+            "-H", "priority: u=0",
+            "-H", "te: trailers",
+            "-H", "pragma: no-cache",
+            "-H", "cache-control: no-cache",
+            "https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2" };
+
+        Assert.Equal(expected, ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2", 17));
+    }
+
+    // Ein Zeilenumbruch im (vom Aufrufer gelieferten) Bearer darf in der Header-Datei keinen zweiten Header
+    // erzeugen: curl liest jede Zeile als eigenen Header.
+    [Fact]
+    public void BuildGetHeaderStdin_StripsLineBreaks_SingleHeaderLine()
+    {
+        var text = ChessableHttpService.BuildGetHeaderStdin("a.b.c\r\nx-injected: 1\n");
+        Assert.Equal("authorization: Bearer a.b.cx-injected: 1\n", text);
+        Assert.Single(text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
     }
 
     [Fact]
@@ -222,7 +273,7 @@ public class ChessableHttpServiceTests
     [Fact]
     public void BuildGetArgs_SetsConnectTimeout30()
     {
-        var args = ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?oid=1", "bearer");
+        var args = ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?oid=1");
         var i = args.IndexOf("--connect-timeout");
         Assert.True(i >= 0, "--connect-timeout fehlt");
         Assert.Equal("30", args[i + 1]);
