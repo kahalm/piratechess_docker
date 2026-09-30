@@ -1,16 +1,17 @@
-# gluetun Control-Server-Auth — gibt die IP-Rotations-Routen frei.
-# Control-Port nur intern erreichbar (FIREWALL_INPUT_PORTS), zusätzlich auf API-Key gehärtet.
+# gluetun Control-Server-Auth für die IP-Rotation — Vorlage zu docker-compose.yml (lokale Entwicklung).
+# Die Stacks /opt/stacks/rookhub-schach{,-dev} haben ihre eigene gluetun-auth.toml; die ist dort maßgeblich.
 #
-# AKTIVIERUNG (pro Stack, NICHT im Repo-Template — hier steht nur ein Platzhalter):
-#   1. In /opt/stacks/rookhub-schach{,-dev}/gluetun-auth.toml den `apikey` auf den echten
-#      Secret setzen (= GLUETUN_APIKEY aus der jeweiligen .env).
-#   2. piratechess-api bekommt denselben Secret als `Gluetun__ApiKey`-Env (aus der .env) →
-#      VpnRotationService schickt ihn als X-API-Key (siehe Program.cs).
-#   3. gluetun + piratechess-api ZUSAMMEN neu starten (sonst Mismatch → Rotation bricht).
-# Der Code ist rückwärtskompatibel: ohne gesetzten Key sendet piratechess keinen Header und
-# auth="none" funktioniert weiter — die Umstellung kann also kontrolliert erfolgen.
+# AUSGANGSZUSTAND: auth = "none", passend zu GLUETUN_APIKEY= (leer) in .env.example. piratechess schickt dann keinen
+# X-API-Key, die Rotation funktioniert sofort. Der Control-Port ist nur aus dem Compose-Netz erreichbar
+# (FIREWALL_INPUT_PORTS=8888,8000, kein Host-Port). So laufen auch Prod und Dev.
+#
+# UMSTELLUNG AUF API-KEY (beide Seiten mit DEMSELBEN, selbst erzeugten Wert, z. B. openssl rand -hex 32):
+#   1. hier: auth = "apikey" und darunter apikey = "<wert>"
+#   2. .env: GLUETUN_APIKEY=<wert>  (→ Gluetun__ApiKey → X-API-Key, siehe Program.cs)
+#   3. gluetun + piratechess-api ZUSAMMEN neu starten, sonst endet jede Rotation mit 401.
+# Nie einen Beispielwert übernehmen: ein öffentlich bekannter Schlüssel schützt nichts.
+# In den Stacks gilt dasselbe mit deren Dateien; deren compose.yaml reicht Gluetun__ApiKey heute nicht durch.
 [[roles]]
 name = "rotation"
 routes = ["GET /v1/publicip/ip", "GET /v1/vpn/status", "PUT /v1/vpn/status"]
-auth = "apikey"
-apikey = "CHANGE_ME"
+auth = "none"

@@ -1,3 +1,13 @@
+# Beispiel für die LOKALE Entwicklung: eigener gluetun-Tunnel, eigene MariaDB, API aus dem Quellcode.
+# Der Betrieb läuft NICHT über diese Datei: piratechess-api ist ein Dienst in /opt/stacks/rookhub-schach (Prod,
+# :latest, zwei Tunnel, kein Host-Port) bzw. /opt/stacks/rookhub-schach-dev (Dev, :dev). Dort sind compose.yaml und
+# .env maßgeblich (Proxy-/Rotations-Einstellungen, DB in der gemeinsamen rookhub-MariaDB, Logs ins gemeinsame ES).
+# - Ports nur an 127.0.0.1: MariaDB (3308) und die API (5000) sind nicht aus dem Netz erreichbar, auch wenn die Datei
+#   auf einem Server mit öffentlicher IP läuft.
+# - Start: cp .env.example .env, Geheimnisse setzen, docker compose up --build
+#   (docker-compose.override.yml kommt automatisch dazu: dotnet watch mit eingebundenem Quellcode).
+# - gluetun-auth.toml steht wie Prod/Dev auf auth="none" und passt so zu GLUETUN_APIKEY= (leer) in .env.example;
+#   die Umstellung auf auth="apikey" steht in gluetun-auth.toml.
 services:
   gluetun:
     image: qmcgaw/gluetun
@@ -43,7 +53,7 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports:
-      - "3308:3306"
+      - "127.0.0.1:3308:3306"
     volumes:
       - db_data:/var/lib/mysql
       - ./db/init:/docker-entrypoint-initdb.d
@@ -73,8 +83,8 @@ services:
       # deaktiviert die Rotation. Default: alle 20 Requests (Vpn__RotateAfterRequests).
       Gluetun__ControlUrl: ${GLUETUN_CONTROL_URL:-http://gluetun:8000}
       # Optionaler API-Key für den gluetun-Control-Server. Leer lassen → kein
-      # X-API-Key-Header (auth="none" in gluetun-auth.toml bleibt kompatibel).
-      # Nur setzen, wenn gluetun-auth.toml auf auth="apikey" steht.
+      # X-API-Key-Header, passend zu auth="none" in gluetun-auth.toml (Ausgangszustand).
+      # Nur zusammen mit auth="apikey" + demselben apikey in gluetun-auth.toml setzen.
       Gluetun__ApiKey: ${GLUETUN_APIKEY:-}
       Vpn__RotateAfterRequests: ${VPN_ROTATE_AFTER_REQUESTS:-20}
       # Kurs-Cache aus Browser-Uploads (A3-002): standardmäßig AUS. Kapitelzahl/„vollständig" sind Angaben des
@@ -88,7 +98,7 @@ services:
       Elasticsearch__Url: ${ELASTICSEARCH_URL:-}
       Elasticsearch__IndexFormat: ${ELASTICSEARCH_INDEX_FORMAT:-piratechess-logs-{0:yyyy.MM}}
     ports:
-      - "5000:8080"
+      - "127.0.0.1:5000:8080"
     depends_on:
       db:
         condition: service_healthy
