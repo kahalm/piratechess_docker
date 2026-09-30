@@ -46,6 +46,57 @@ public class CourseFetchJobStoreTests
     }
 
     [Fact]
+    public void Cancel_RunningJob_SetsCancelled_AndSignalsToken()
+    {
+        var store = new CourseFetchJobStore();
+        var job = store.Create("run");
+
+        Assert.True(job.Cancel());
+
+        Assert.Equal("cancelled", job.Snapshot().Status);
+        Assert.True(job.CancellationToken.IsCancellationRequested);
+        Assert.NotNull(job.TerminalAt);
+    }
+
+    [Fact]
+    public void Cancel_ThenCompleteOrFail_StaysCancelled()
+    {
+        // Der Fetch-Worker kann nach dem Abbruch noch fertig werden oder scheitern: der Abbruch bleibt stehen.
+        var job = new CourseFetchJobStore().Create("run");
+        job.Cancel();
+
+        job.Complete("PGN", "Name", 1, 1);
+        job.Fail("boom");
+
+        var s = job.Snapshot();
+        Assert.Equal("cancelled", s.Status);
+        Assert.Null(s.Pgn);
+    }
+
+    [Fact]
+    public void Cancel_TerminalJob_ReturnsFalse_KeepsStatus()
+    {
+        var job = new CourseFetchJobStore().Create("done");
+        job.Complete("PGN", "Name", 1, 1);
+
+        Assert.False(job.Cancel());
+        Assert.Equal("completed", job.Snapshot().Status);
+    }
+
+    [Fact]
+    public void Prune_RemovesExpiredCancelledJobs()
+    {
+        var store = new CourseFetchJobStore();
+        var job = store.Create("cancelled");
+        job.Cancel();
+        job.CreatedAt = Now;
+        job.TerminalAt = Now - CourseFetchJobStore.TerminalTtl - TimeSpan.FromMinutes(1);
+
+        Assert.Equal(1, store.Prune(Now));
+        Assert.Null(store.Get("cancelled"));
+    }
+
+    [Fact]
     public void Prune_EnforcesMaxJobsCap()
     {
         var store = new CourseFetchJobStore();

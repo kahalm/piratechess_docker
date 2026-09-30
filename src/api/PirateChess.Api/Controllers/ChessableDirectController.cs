@@ -31,6 +31,7 @@ public class ChessableDirectController : ControllerBase
     private readonly VpnIpHealth _ipHealth;
     private readonly IVpnRotationService _vpn;
     private readonly IConfiguration _config;
+    private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<ChessableDirectController> _logger;
 
     public ChessableDirectController(
@@ -42,6 +43,7 @@ public class ChessableDirectController : ControllerBase
         VpnIpHealth ipHealth,
         IVpnRotationService vpn,
         IConfiguration config,
+        IHostApplicationLifetime lifetime,
         ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
@@ -52,6 +54,7 @@ public class ChessableDirectController : ControllerBase
         _ipHealth = ipHealth;
         _vpn = vpn;
         _config = config;
+        _lifetime = lifetime;
         _logger = logger;
     }
 
@@ -594,6 +597,7 @@ public class ChessableDirectController : ControllerBase
         var jobId = Guid.NewGuid().ToString("N");
         _jobStore.Create(jobId);
         // Fire-and-forget: _chessableHttp + _jobStore sind Singletons → nach Controller-Dispose gültig.
+        // Abbruch über DELETE course/{jobId} oder beim Container-Stopp (siehe RunFetchAsync).
         _ = Task.Run(() => RunFetchAsync(jobId, bearer, uid, request.Bid, mode, request.ForceRefresh));
         return Ok(new DirectCourseStartResponse(jobId));
     }
@@ -613,33 +617,49 @@ public class ChessableDirectController : ControllerBase
             s.ChapterCount, s.LineCount, s.CourseName,
             s.Status == "completed" ? s.Pgn : null, s.Error);
 
-        if (s.Status is "completed" or "failed")
+        if (s.Status is "completed" or "failed" or "cancelled")
             _jobStore.Remove(jobId); // einmaliger Terminal-Read
 
         return Ok(dto);
+    }
+
+    /// <summary>Bricht einen Kurs-Abruf-Job ab (S2-008) und gibt ihn frei, auch ein schon fertiges PGN. Der
+    /// laufende Chessable-Abruf endet sofort (ein laufender curl wird beendet), es geht kein weiterer Request
+    /// über die VPN-IP. Für rookhub bei Abbruch, Pause oder erkanntem Stillstand des Imports.</summary>
+    [HttpDelete("course/{jobId}")]
+    public IActionResult CancelCourse(string jobId)
+    {
+        var job = _jobStore.Get(jobId);
+        if (job is null) return NotFound(new { message = "Job not found" });
+        var cancelled = job.Cancel();
+        _jobStore.Remove(jobId);
+        return Ok(new { cancelled });
     }
 
     private async Task RunFetchAsync(string jobId, string bearer, string uid, string bid, string mode, bool forceRefresh = false)
     {
         var job = _jobStore.Get(jobId);
         if (job is null) return;
+        // Abbruch (S2-008): DELETE course/{jobId} oder Container-Stopp. Das Token reicht bis zum curl-Kill.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(job.CancellationToken, _lifetime.ApplicationStopping);
+        var ct = cts.Token;
         // Lifecycle-Logs dieses Fetch-Jobs für die zentrale Kibana-Filterung taggen → ECS `tags`.
         using var _tagScope = LogContext.PushProperty("LogTags", "chessable,scrape");
         try
         {
             // Rohdaten aus dem (kurs-/bid-weiten) Cache wiederverwenden → kein Chessable-Call,
             // auch wenn ein anderer User denselben Kurs schon geholt hat.
-            var data = forceRefresh ? null : await _rawCache.GetAsync(bid);
+            var data = forceRefresh ? null : await _rawCache.GetAsync(bid, ct);
             if (data is null)
             {
                 // Per-Bid-Lock: zwei parallele Cache-Misses desselben Kurses sollen nicht beide über
                 // die VPN-IP fetchen. Nach Lock-Eintritt erneut prüfen (ein paralleler Fetch könnte den
                 // Cache inzwischen gefüllt haben). Dispose räumt den Lock-Eintrag per Refcount wieder ab.
-                using (await _rawCache.AcquireBidLockAsync(bid))
+                using (await _rawCache.AcquireBidLockAsync(bid, ct))
                 {
                     // Force-Refresh umgeht den Cache (siehe Course-Endpoint): der alte Stand bleibt
                     // stehen, bis der neue Abruf wirklich durch ist.
-                    data = forceRefresh ? null : await _rawCache.GetAsync(bid);
+                    data = forceRefresh ? null : await _rawCache.GetAsync(bid, ct);
                     if (data is null)
                     {
                         if (string.IsNullOrWhiteSpace(bearer))
@@ -665,7 +685,10 @@ public class ChessableDirectController : ControllerBase
                                 if (int.TryParse(total.Trim(), out var l)) job.LinesDone = l;
                             },
                             onTotalLines: t => job.LinesTotal = t,
-                            bypassLineCache: forceRefresh);
+                            bypassLineCache: forceRefresh,
+                            ct: ct);
+                        // Der Kursabruf meldet einen Abbruch teils als Fehlertext statt als Ausnahme.
+                        ct.ThrowIfCancellationRequested();
 
                         if (fetchError is not null)
                         {
@@ -673,7 +696,7 @@ public class ChessableDirectController : ControllerBase
                             return;
                         }
                         data = fetched;
-                        if (data is not null) await _rawCache.SetAsync(bid, data);
+                        if (data is not null) await _rawCache.SetAsync(bid, data, ct);
                     }
                 }
             }
@@ -696,12 +719,18 @@ public class ChessableDirectController : ControllerBase
 
             lib.SetErrorDiagEvent(detail =>
                 _logger.LogWarning("Chessable-Parser übersprang eine Linie/Kapitel (job {JobId}, bid {Bid}): {Detail}", jobId, bid, detail));
-            var (pgn, courseName) = await Task.Run(() => lib.GetCourse(bid, useLocalData: true));
+            ct.ThrowIfCancellationRequested();
+            var (pgn, courseName) = await Task.Run(() => lib.GetCourse(bid, useLocalData: true), ct);
             if (lib.ErrorCount > 0)
                 _logger.LogWarning("Kurs-Fetch-Job {JobId} bid {Bid} mit {Errors} übersprungenen Linien/Kapiteln abgeschlossen", jobId, bid, lib.ErrorCount);
             var lnCount = data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0;
             if (lnCount > job.LinesTotal) job.LinesTotal = lnCount; // tatsächliche Zahl ist autoritativ
             job.Complete(pgn, courseName, data?.ChapterList.Count ?? 0, lnCount);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            job.Cancel();
+            _logger.LogInformation("Kurs-Fetch-Job {JobId} bid {Bid} abgebrochen", jobId, bid);
         }
         catch (Exception ex)
         {

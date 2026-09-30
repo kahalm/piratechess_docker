@@ -10,10 +10,10 @@ public class CourseFetchJob
 {
     /// <summary>Anlage-Zeitpunkt (für TTL/Reaping im <see cref="CourseFetchJobStore"/>). internal set nur für Tests.</summary>
     public DateTime CreatedAt { get; internal set; } = DateTime.UtcNow;
-    /// <summary>Zeitpunkt des Übergangs auf completed/failed (für die kürzere Terminal-TTL). internal set nur für Tests.</summary>
+    /// <summary>Zeitpunkt des Übergangs auf completed/failed/cancelled (für die kürzere Terminal-TTL). internal set nur für Tests.</summary>
     public DateTime? TerminalAt { get; internal set; }
 
-    public string Status { get; set; } = "running"; // running | completed | failed
+    public string Status { get; set; } = "running"; // running | completed | failed | cancelled
     public int ChaptersDone { get; set; }
     public int ChaptersTotal { get; set; }
     public int LinesDone { get; set; }
@@ -32,11 +32,36 @@ public class CourseFetchJob
     // Der terminale Übergang + der terminale Read laufen daher unter diesem Gate.
     private readonly object _gate = new();
 
-    /// <summary>Atomar: Ergebnis setzen + auf "completed" schalten (alle Felder unter einer Barriere).</summary>
+    // Abbruch (S2-008): DELETE course/{jobId} bricht den Abruf ab; der Fetch-Worker verknüpft dieses Token mit
+    // ApplicationStopping. Eigene CTS ohne Registrierungen und ohne Timer → braucht kein Dispose.
+    private readonly CancellationTokenSource _cts = new();
+
+    /// <summary>Wird mit <see cref="Cancel"/> ausgelöst; der Fetch-Worker reicht es bis zum curl-Aufruf durch.</summary>
+    public CancellationToken CancellationToken => _cts.Token;
+
+    /// <summary>Atomar: einen laufenden Job auf "cancelled" schalten und seinen Abruf abbrechen. Liefert false,
+    /// wenn der Job schon terminal war (dann bleibt sein Status stehen).</summary>
+    public bool Cancel()
+    {
+        lock (_gate)
+        {
+            if (Status != "running") return false;
+            Error = "Abgebrochen";
+            Status = "cancelled";
+            TerminalAt = DateTime.UtcNow;
+        }
+        // Außerhalb des Gates: Cancel führt die Registrierungen (curl-Kill) synchron aus.
+        _cts.Cancel();
+        return true;
+    }
+
+    /// <summary>Atomar: Ergebnis setzen + auf "completed" schalten (alle Felder unter einer Barriere).
+    /// Ein abgebrochener Job bleibt abgebrochen.</summary>
     public void Complete(string pgn, string courseName, int chapterCount, int lineCount)
     {
         lock (_gate)
         {
+            if (Status == "cancelled") return;
             Pgn = pgn;
             CourseName = courseName;
             ChapterCount = chapterCount;
@@ -46,11 +71,12 @@ public class CourseFetchJob
         }
     }
 
-    /// <summary>Atomar: Fehler setzen + auf "failed" schalten.</summary>
+    /// <summary>Atomar: Fehler setzen + auf "failed" schalten. Ein abgebrochener Job bleibt abgebrochen.</summary>
     public void Fail(string error)
     {
         lock (_gate)
         {
+            if (Status == "cancelled") return;
             Error = error;
             Status = "failed";
             TerminalAt = DateTime.UtcNow;
@@ -68,7 +94,7 @@ public class CourseFetchJob
 /// <summary>Hält laufende/fertige Kurs-Abruf-Jobs im Speicher, je per Job-Id.</summary>
 public class CourseFetchJobStore
 {
-    /// <summary>Terminale (completed/failed) Jobs werden so lange aufbewahrt, dass ein normaler
+    /// <summary>Terminale (completed/failed/cancelled) Jobs werden so lange aufbewahrt, dass ein normaler
     /// rookhub-Poll das Ergebnis (PGN) noch abholen kann; danach freigegeben.</summary>
     public static readonly TimeSpan TerminalTtl = TimeSpan.FromMinutes(30);
     /// <summary>Harte Obergrenze für JEDEN Job (auch „running") gegen steckengebliebene/verwaiste Einträge.</summary>
@@ -104,7 +130,7 @@ public class CourseFetchJobStore
         foreach (var (id, job) in _jobs)
         {
             var snap = job.Snapshot();
-            var terminal = snap.Status is "completed" or "failed";
+            var terminal = snap.Status is "completed" or "failed" or "cancelled";
             var tooOld = nowUtc - job.CreatedAt > MaxJobAge;
             var terminalExpired = terminal && job.TerminalAt is { } t && nowUtc - t > TerminalTtl;
             if ((tooOld || terminalExpired) && _jobs.TryRemove(id, out _)) removed++;
@@ -114,7 +140,7 @@ public class CourseFetchJobStore
         {
             // Ältester zuerst, terminale vor laufenden (laufende möglichst nicht abwürgen).
             var overflow = _jobs
-                .OrderByDescending(kv => kv.Value.Snapshot().Status is "completed" or "failed")
+                .OrderByDescending(kv => kv.Value.Snapshot().Status is "completed" or "failed" or "cancelled")
                 .ThenBy(kv => kv.Value.CreatedAt)
                 .Take(_jobs.Count - MaxJobs)
                 .Select(kv => kv.Key)
