@@ -134,6 +134,9 @@ builder.Services.AddSingleton<BrowserCourseParseService>();
 // inaktive Verbindung und öffnet für den start-PUT eine frische.
 builder.Services.AddHttpClient(VpnRotationService.ClientName, client =>
     {
+        // Explizites Timeout statt 100-s-Standard: ein hängender Control-Server blockiert den Tunnel sonst bis
+        // ~200 s (stop-PUT + Recovery-PUT). Zeitüberschreitung und 5xx wiederholt VpnTunnel einmal.
+        client.Timeout = VpnRotationService.ControlTimeout;
         // gluetun-Control-Server härten: ist ein API-Key gesetzt (Gluetun:ApiKey, aus der .env),
         // wird er als X-API-Key mitgeschickt → gluetun-auth.toml kann von auth="none" auf
         // auth="apikey" umgestellt werden. Ohne Key (leer) bleibt das Verhalten wie bisher

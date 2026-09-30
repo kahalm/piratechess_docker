@@ -10,12 +10,18 @@ namespace PirateChess.Api.Services;
 ///
 /// Konfiguration: <c>Chessable:ProxyUrls</c> + <c>Gluetun:ControlUrls</c> (komma-getrennt, paarweise
 /// per Index). Fallback auf die Einzelwerte <c>Chessable:ProxyUrl</c>/<c>Gluetun:ControlUrl</c> →
-/// genau 1 Tunnel = bisheriges Verhalten.
+/// genau 1 Tunnel = bisheriges Verhalten. Als letzter Fallback gilt auch <c>Gluetun:ApiUrl</c>, der
+/// Name, unter dem der Crawler denselben gluetun-Control-Server konfiguriert.
 /// </summary>
 public class VpnRotationService : IVpnRotationService
 {
     /// <summary>Name des un-proxied HttpClients (Control-Calls dürfen NICHT durch den Proxy laufen).</summary>
     public const string ClientName = "GluetunControl";
+
+    /// <summary>Timeout je Aufruf an den gluetun-Control-Server (in Program.cs am Client gesetzt). Ohne ihn
+    /// griffe der HttpClient-Standard von 100 s: ein Control-Server, der die Verbindung annimmt, aber nicht
+    /// antwortet, hielte den Tunnel pro PUT so lange auf „rotating". Der Crawler begrenzt auf 5 s.</summary>
+    public static readonly TimeSpan ControlTimeout = TimeSpan.FromSeconds(10);
 
     private readonly List<VpnTunnel> _tunnels;
     private readonly object _activeLock = new();
@@ -34,7 +40,10 @@ public class VpnRotationService : IVpnRotationService
         // den Import ausbremsen und „rotation failed"-Warnungen produzieren.
         _tokenMinHold = TimeSpan.FromSeconds(Math.Max(0, configuration.GetValue("Vpn:TokenMinHoldSec", 120)));
         var proxyUrls = ParseList(configuration["Chessable:ProxyUrls"]) ?? SingleOrEmpty(configuration["Chessable:ProxyUrl"]);
-        var controlUrls = ParseList(configuration["Gluetun:ControlUrls"]) ?? SingleOrEmpty(configuration["Gluetun:ControlUrl"]);
+        var controlUrls = ParseList(configuration["Gluetun:ControlUrls"])
+            ?? SingleOrEmpty(string.IsNullOrWhiteSpace(configuration["Gluetun:ControlUrl"])
+                ? configuration["Gluetun:ApiUrl"]      // Crawler-Name fuer denselben Control-Server
+                : configuration["Gluetun:ControlUrl"]);
 
         var count = Math.Max(Math.Max(proxyUrls.Count, controlUrls.Count), 1);
         _tunnels = new List<VpnTunnel>(count);

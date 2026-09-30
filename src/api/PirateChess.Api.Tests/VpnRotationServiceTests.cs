@@ -109,8 +109,9 @@ public class VpnRotationServiceTests
             await Task.CompletedTask;
             if (body.Contains("running"))
             {
-                // Der erste (reguläre) Start scheitert → das finally muss erneut starten.
-                if (Interlocked.Increment(ref runningCount) == 1)
+                // Der reguläre Start scheitert in beiden Versuchen (5xx wird einmal wiederholt, S2-011)
+                // → das finally muss erneut starten.
+                if (Interlocked.Increment(ref runningCount) <= 2)
                     return new HttpResponseMessage(HttpStatusCode.InternalServerError);
             }
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
@@ -119,8 +120,8 @@ public class VpnRotationServiceTests
         var svc = BuildService(handler);
         await svc.RotateNowAsync(CancellationToken.None);
 
-        // 1× regulärer Start (fehlgeschlagen) + 1× Recovery-Start im finally.
-        Assert.True(runningCount >= 2, $"expected recovery restart, running PUTs={runningCount}");
+        // 2× regulärer Start (fehlgeschlagen) + 1× Recovery-Start im finally.
+        Assert.True(runningCount >= 3, $"expected recovery restart, running PUTs={runningCount}");
     }
 
     [Fact]
@@ -216,9 +217,9 @@ public class VpnRotationServiceTests
     [Fact]
     public async Task Rotation_StartReturnsErrorStatus_StillTriggersRecoveryRestart_NotSwallowedByRetry()
     {
-        // Abgrenzung zum Retry: Ein HTTP-Fehlerstatus (StatusCode gesetzt) ist KEIN
-        // Transport-Reset und darf NICHT vom Retry geschluckt werden — er muss wie
-        // bisher ins Recovery-finally durchschlagen.
+        // Abgrenzung zum Retry: Ein 4xx (z. B. falscher X-API-Key nach Aktivierung der gluetun-Auth)
+        // ist KEIN vorübergehender Fehler und darf NICHT vom Retry geschluckt werden — er muss wie
+        // bisher ins Recovery-finally durchschlagen. (5xx wird seit S2-011 einmal wiederholt.)
         var runningCount = 0;
 
         var handler = new StubHandler(async req =>
@@ -226,15 +227,187 @@ public class VpnRotationServiceTests
             var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
             await Task.CompletedTask;
             if (body.Contains("running") && Interlocked.Increment(ref runningCount) == 1)
-                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable); // 503, kein Reset
+                return new HttpResponseMessage(HttpStatusCode.Unauthorized); // 401, kein Reset
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
         });
 
         var svc = BuildService(handler);
         await svc.RotateNowAsync(CancellationToken.None);
 
-        // 1× regulärer Start (503, propagiert) + 1× Recovery-Start im finally.
-        Assert.True(runningCount >= 2, $"expected recovery restart, running PUTs={runningCount}");
+        // 1× regulärer Start (401, propagiert, nicht wiederholt) + 1× Recovery-Start im finally.
+        Assert.Equal(2, runningCount);
+    }
+
+    // --- S2-011: hängender / kurz gestörter gluetun-Control-Server ------------------------------------
+
+    [Fact]
+    public async Task Rotation_StopPutTimesOut_IsRetried_AndRotationCompletes()
+    {
+        // Der Control-Server nimmt das erste stop-PUT an, antwortet aber nicht (z. B. während seines eigenen
+        // Reconnects). Das Client-Timeout bricht ab; vorher war das eine TaskCanceledException, die NICHT
+        // wiederholt wurde → Rotation gescheitert, Recovery-PUT, alte IP. Jetzt: ein zweiter Versuch.
+        int stops = 0, runnings = 0;
+        var handler = new StubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+            if (body.Contains("stopped") && Interlocked.Increment(ref stops) == 1)
+                await Task.Delay(Timeout.Infinite, ct);   // hängt; nur das Client-Timeout beendet den Aufruf
+            if (body.Contains("running")) Interlocked.Increment(ref runnings);
+            if (req.RequestUri!.AbsolutePath.Contains("publicip"))
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("""{"public_ip":"5.6.7.8"}""") };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+        var svc = BuildService(handler, clientTimeout: TimeSpan.FromMilliseconds(200));
+
+        var ip = await svc.RotateNowAsync(CancellationToken.None);
+
+        Assert.Equal("5.6.7.8", ip);
+        Assert.Equal(2, stops);
+        Assert.Equal(1, runnings);   // kein Recovery-PUT
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task Rotation_StopPutReturns5xx_IsRetried_AndRotationCompletes(HttpStatusCode status)
+    {
+        int stops = 0, runnings = 0;
+        var handler = new StubHandler(async req =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+            if (body.Contains("stopped") && Interlocked.Increment(ref stops) == 1)
+                return new HttpResponseMessage(status);
+            if (body.Contains("running")) Interlocked.Increment(ref runnings);
+            if (req.RequestUri!.AbsolutePath.Contains("publicip"))
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("""{"public_ip":"5.6.7.8"}""") };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+        var svc = BuildService(handler);
+
+        var ip = await svc.RotateNowAsync(CancellationToken.None);
+
+        Assert.Equal("5.6.7.8", ip);
+        Assert.Equal(2, stops);
+        Assert.Equal(1, runnings);
+    }
+
+    [Fact]
+    public async Task Rotation_ControlServerHangsCompletely_EndsAfterTimeouts_AndReleasesTunnel()
+    {
+        // Worst Case: jeder Aufruf hängt. Die Rotation muss nach 2× stop + 2× Recovery-running (je ein
+        // Client-Timeout) enden und den Tunnel wieder freigeben, statt ihn minutenlang auf „rotating" zu halten.
+        var calls = 0;
+        var handler = new StubHandler(async (req, ct) =>
+        {
+            Interlocked.Increment(ref calls);
+            await Task.Delay(Timeout.Infinite, ct);
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+        var svc = BuildService(handler, clientTimeout: TimeSpan.FromMilliseconds(200));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ip = await svc.RotateNowAsync(CancellationToken.None);
+        sw.Stop();
+
+        Assert.Null(ip);
+        Assert.Equal(4, calls);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"rotation took {sw.Elapsed}");
+        Assert.False(svc.DescribeTunnels()[0].Rotating);
+    }
+
+    [Fact]
+    public async Task Rotation_CallerCancels_IsNotRetried()
+    {
+        // Abgrenzung: bricht der Aufrufer selbst ab, ist das kein Timeout → kein zweiter stop-Versuch.
+        var stops = 0;
+        using var cts = new CancellationTokenSource();
+        var handler = new StubHandler(async req =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync();
+            if (body.Contains("stopped"))
+            {
+                Interlocked.Increment(ref stops);
+                cts.Cancel();
+                throw new TaskCanceledException();
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        });
+        var svc = BuildService(handler);
+
+        await svc.RotateNowAsync(cts.Token);
+
+        Assert.Equal(1, stops);
+    }
+
+    [Theory]
+    [InlineData(null, true)]                                  // Transportfehler (Reset)
+    [InlineData(HttpStatusCode.InternalServerError, true)]
+    [InlineData(HttpStatusCode.GatewayTimeout, true)]
+    [InlineData(HttpStatusCode.Unauthorized, false)]          // falscher X-API-Key
+    [InlineData(HttpStatusCode.NotFound, false)]
+    public void IsTransientControlFailure_HttpStatus(HttpStatusCode? status, bool expected)
+    {
+        var ex = new HttpRequestException("x", null, status);
+        Assert.Equal(expected, VpnTunnel.IsTransientControlFailure(ex, CancellationToken.None));
+    }
+
+    [Fact]
+    public void IsTransientControlFailure_TimeoutVsCallerCancel()
+    {
+        Assert.True(VpnTunnel.IsTransientControlFailure(
+            new TaskCanceledException("timeout", new TimeoutException()), CancellationToken.None));
+        Assert.False(VpnTunnel.IsTransientControlFailure(
+            new TaskCanceledException(), new CancellationToken(canceled: true)));
+        Assert.False(VpnTunnel.IsTransientControlFailure(new InvalidOperationException(), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ControlUrl_FallsBackTo_CrawlerName_GluetunApiUrl()
+    {
+        // Der Crawler konfiguriert denselben Control-Server als Gluetun:ApiUrl. piratechess nimmt den Namen
+        // als letzten Fallback an (ControlUrls > ControlUrl > ApiUrl).
+        string? host = null;
+        var handler = new StubHandler(req =>
+        {
+            host = req.RequestUri!.Host;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent("""{"public_ip":"4.4.4.4"}""") });
+        });
+        var svc = new VpnRotationService(new StubHttpClientFactory(handler),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Gluetun:ControlUrl"] = "",               // wie appsettings.json
+                ["Gluetun:ApiUrl"] = "http://gluetun-api:8000",
+            }).Build(),
+            NullLogger<VpnRotationService>.Instance);
+
+        Assert.Equal("4.4.4.4", await svc.GetTunnelPublicIpAsync(0));
+        Assert.Equal("gluetun-api", host);
+    }
+
+    [Fact]
+    public async Task ControlUrl_WinsOver_GluetunApiUrl()
+    {
+        string? host = null;
+        var handler = new StubHandler(req =>
+        {
+            host = req.RequestUri!.Host;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent("""{"public_ip":"4.4.4.4"}""") });
+        });
+        var svc = new VpnRotationService(new StubHttpClientFactory(handler),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Gluetun:ControlUrl"] = "http://gluetun-control:8000",
+                ["Gluetun:ApiUrl"] = "http://gluetun-api:8000",
+            }).Build(),
+            NullLogger<VpnRotationService>.Instance);
+
+        await svc.GetTunnelPublicIpAsync(0);
+        Assert.Equal("gluetun-control", host);
     }
 
     // --- Token-gekoppelte Rotation: Ping-Pong dämpfen -----------------------
@@ -308,7 +481,8 @@ public class VpnRotationServiceTests
         Assert.Equal(0, stops);
     }
 
-    private static VpnRotationService BuildService(HttpMessageHandler handler, int minHoldSec = 0, int rotateAfter = 1)
+    private static VpnRotationService BuildService(HttpMessageHandler handler, int minHoldSec = 0, int rotateAfter = 1,
+        TimeSpan? clientTimeout = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -323,19 +497,27 @@ public class VpnRotationServiceTests
             .Build();
 
         return new VpnRotationService(
-            new StubHttpClientFactory(handler), config, NullLogger<VpnRotationService>.Instance);
+            new StubHttpClientFactory(handler, clientTimeout), config, NullLogger<VpnRotationService>.Instance);
     }
 
-    private sealed class StubHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
+    private sealed class StubHttpClientFactory(HttpMessageHandler handler, TimeSpan? timeout = null) : IHttpClientFactory
     {
-        public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+        public HttpClient CreateClient(string name)
+        {
+            var client = new HttpClient(handler, disposeHandler: false);
+            if (timeout is { } t) client.Timeout = t;
+            return client;
+        }
     }
 
-    private sealed class StubHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> responder)
+    private sealed class StubHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> responder)
         : HttpMessageHandler
     {
+        public StubHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> responder)
+            : this((req, _) => responder(req)) { }
+
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
-            => responder(request);
+            => responder(request, cancellationToken);
     }
 }

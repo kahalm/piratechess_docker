@@ -288,9 +288,21 @@ internal sealed class VpnTunnel
                 (await client.PutAsync(statusUrl, body, ct)).EnsureSuccessStatusCode();
                 return;
             }
-            catch (HttpRequestException ex) when (ex.StatusCode is null && attempt < maxAttempts) { }
+            catch (Exception ex) when (attempt < maxAttempts && IsTransientControlFailure(ex, ct)) { }
         }
     }
+
+    /// <summary>Lohnt ein zweiter Versuch? Ja bei Transportfehlern (z. B. tote gepoolte Verbindung), bei einem
+    /// Timeout des Control-Clients (<see cref="VpnRotationService.ControlTimeout"/>) und bei 5xx. Nein bei 4xx
+    /// (etwa falscher X-API-Key) und wenn der Aufrufer selbst abgebrochen hat. Den Status setzen ist
+    /// idempotent, ein wiederholtes „stopped"/„running" schadet also nicht.</summary>
+    internal static bool IsTransientControlFailure(Exception ex, CancellationToken ct) => ex switch
+    {
+        HttpRequestException { StatusCode: null } => true,
+        HttpRequestException { StatusCode: { } code } => (int)code >= 500,
+        OperationCanceledException => !ct.IsCancellationRequested,
+        _ => false,
+    };
 
     private async Task EnsureVpnRunningAsync(HttpClient client, string statusUrl)
     {
