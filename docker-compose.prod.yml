@@ -80,6 +80,11 @@ services:
       # auth="none" bleibt kompatibel). gluetun + api dann ZUSAMMEN neu starten.
       Gluetun__ApiKey: ${GLUETUN_APIKEY}
       Vpn__RotateAfterRequests: ${VPN_ROTATE_AFTER_REQUESTS}
+      # Kurs-Cache aus Browser-Uploads (A3-002): standardmäßig AUS. Kapitelzahl/„vollständig" sind Angaben des
+      # Clients (kein eigener getCourse-Abruf) – ein erfundener Ein-Kapitel-Upload legte sonst den Kurs-Cache des
+      # ganzen bids für alle Server-Importe an. Browser-Linien landen unabhängig davon im Linien-Cache.
+      # true = Produktentscheidung (z. B. Fast-Lane/Reprocess für nur per Browser erfasste Kurse auf PROD).
+      Chessable__BrowserCourseCacheEnabled: ${BROWSER_COURSE_CACHE_ENABLED:-false}
       # Strukturierte Logs (Serilog) gehen ins selbe Elasticsearch wie rookhub
       # → eigener Index `piratechess-logs-*`. URL leer lassen deaktiviert den
       # ES-Sink (Console-Logger bleibt aktiv).

@@ -30,6 +30,7 @@ public class ChessableDirectController : ControllerBase
     private readonly RawCourseReconstructor _reconstructor;
     private readonly VpnIpHealth _ipHealth;
     private readonly IVpnRotationService _vpn;
+    private readonly IConfiguration _config;
     private readonly ILogger<ChessableDirectController> _logger;
 
     public ChessableDirectController(
@@ -40,6 +41,7 @@ public class ChessableDirectController : ControllerBase
         RawCourseReconstructor reconstructor,
         VpnIpHealth ipHealth,
         IVpnRotationService vpn,
+        IConfiguration config,
         ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
@@ -49,8 +51,18 @@ public class ChessableDirectController : ControllerBase
         _reconstructor = reconstructor;
         _ipHealth = ipHealth;
         _vpn = vpn;
+        _config = config;
         _logger = logger;
     }
+
+    /// <summary>
+    /// Darf ein vollständiger Browser-Upload den Kurs-Cache eines bids anlegen? Standardmäßig NEIN (A3-002): die
+    /// Kapitelzahl stammt aus dem courseJson des Clients, piratechess kann sie ohne eigenen getCourse-Abruf nicht
+    /// prüfen — ein selbstkonsistenter Upload mit einem Kapitel legte sonst den Kurs-Cache des GANZEN bids an, den
+    /// danach jeder Server-Import (Fast-Lane, Admin „Kurse von Usern holen", Reprocess) für alle liefert.
+    /// Einschalten mit <c>Chessable:BrowserCourseCacheEnabled=true</c> ist eine Produktentscheidung.
+    /// </summary>
+    private bool BrowserCourseCacheEnabled => _config.GetValue("Chessable:BrowserCourseCacheEnabled", false);
 
     /// <summary>Chessable-Kurs-IDs sind numerisch. bid VOR Cache-Lock/Fetch gegen dieses Format prüfen:
     /// verhindert, dass beliebige (ungültige) Strings Per-bid-Locks im <see cref="RawCourseCache"/>
@@ -321,7 +333,15 @@ public class ChessableDirectController : ControllerBase
         if (linesFromCache > 0 || linesMissing > 0)
             _logger.LogInformation("Browser-Parse bid {Bid}: {FromCache} Linien aus dem geteilten Cache, {Missing} ohne Inhalt ausgelassen",
                 request.Bid, linesFromCache, linesMissing);
-        await StoreInSharedCacheAsync(request, chapters, data, allAligned, linesMissing, ct);
+        try
+        {
+            await StoreInSharedCacheAsync(request, chapters, data, allAligned, linesMissing, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Der Import ist schon geparst; ein Fehler beim Ablegen im geteilten Cache kostet nur den Cache-Eintrag.
+            _logger.LogWarning(ex, "Browser-Parse bid {Bid}: Ablegen im geteilten Cache fehlgeschlagen — Import geht ohne Cache weiter", request.Bid);
+        }
 
         var lineCount = data.ChapterList.Sum(c => c.ResponseLineList.Count);
         return Ok(new DirectCourseResponse(request.Bid, courseName, mode, data.ChapterList.Count, lineCount, pgn));
@@ -333,11 +353,16 @@ public class ChessableDirectController : ControllerBase
     /// (1) jede mitgeschickte Linie mit oid, deren getGame-Antwort selbst dieselbe oid und diesen Kurs nennt
     ///     (<see cref="BrowserCourseAssembler.SharableLines"/>), sofern es für die oid noch keine Zeile gibt (nie
     ///     überschreiben, auch keine als ungültig markierte);
-    /// (2) den ganzen Kurs NUR, wenn der Browser ihn vollständig geholt hat: <c>Complete</c>, echte
-    ///     getCourse-Antwort mit derselben Kapitelzahl, keine Linie ohne Inhalt, jede Linie danach gültig unter
-    ///     diesem Kurs im Linien-Cache, noch kein Eintrag vorhanden.
+    /// (2) den ganzen Kurs NUR mit <c>Chessable:BrowserCourseCacheEnabled=true</c> (Standard: aus) und nur, wenn der
+    ///     Browser ihn als vollständig meldet: <c>Complete</c>, ein <c>CourseJson</c> mit derselben Kapitelzahl, keine
+    ///     Linie ohne Inhalt, jede Linie danach gültig unter diesem Kurs im Linien-Cache, noch kein Eintrag vorhanden.
     /// Ein Teil-Kurs im Kurs-Cache gälte für ALLE als „vollständig gecacht" und würde nie mehr frisch geholt.
-    /// Nie fatal — der Import ist zu diesem Zeitpunkt schon geparst.
+    /// BEKANNT OFFEN (A3-002), darum der Schalter: <c>Complete</c> und <c>CourseJson</c> sind Client-Angaben, KEINE
+    /// echte getCourse-Antwort — piratechess prüft die Kapitelzahl nur gegen sich selbst. Und die Prüfung „jede Linie
+    /// gültig unter diesem Kurs" zählt die Linien mit, die (1) im SELBEN Aufruf gerade abgelegt hat. Ein Chunk mit
+    /// einem Kapitel + ein erfundenes courseJson mit einem Kapitel + selbstkonsistente (oder echte) Linien legt so
+    /// den Kurs-Cache des ganzen bids an.
+    /// Nie fatal — der Import ist zu diesem Zeitpunkt schon geparst (der Aufrufer fängt jeden Fehler ab).
     /// </summary>
     private async Task StoreInSharedCacheAsync(DirectCourseParseRequest request, List<DirectParseChapter> chapters,
         piratechess_lib.RestResponseCourse parsed, bool allAligned, int linesMissing, CancellationToken ct)
@@ -353,14 +378,22 @@ public class ChessableDirectController : ControllerBase
 
         if (!request.Complete || !allAligned || linesMissing > 0 || string.IsNullOrWhiteSpace(request.CourseJson))
             return;
+        if (!BrowserCourseCacheEnabled)
+        {
+            _logger.LogInformation("Browser-Parse bid {Bid}: als vollständig gemeldet, Kurs-Cache aus dem Browser ist aus (Chessable:BrowserCourseCacheEnabled) — nur Linien-Cache", request.Bid);
+            return;
+        }
+        // Client-Angabe gegen Client-Angabe: fängt nur eine inkonsistente Meldung ab, keine erfundene.
         if (BrowserCourseAssembler.CourseChapterCount(request.CourseJson) != parsed.ChapterList.Count)
         {
-            _logger.LogInformation("Browser-Parse bid {Bid}: Kapitelzahl weicht von getCourse ab — kein Kurs-Cache", request.Bid);
+            _logger.LogInformation("Browser-Parse bid {Bid}: Kapitelzahl weicht vom mitgeschickten courseJson ab — kein Kurs-Cache", request.Bid);
             return;
         }
         // Der Kurs-Cache verweist nur auf oids, die Inhalte liest er aus dem Linien-Cache. Liegt nicht JEDE Linie
         // gültig unter diesem Kurs dort (nicht geteilt, markiert, einem anderen Kurs zugeordnet), bleibt es beim
-        // Linien-Cache — sonst schriebe das Seeding des Kurs-Caches den Client-Inhalt doch noch hinein.
+        // Linien-Cache — sonst schriebe das Seeding des Kurs-Caches den Client-Inhalt doch noch hinein. Mitgezählt
+        // werden auch die eben in (1) als FromBrowser abgelegten Linien: das hält fremde/markierte Linien fern,
+        // bestätigt aber keinen Inhalt und keine Kapitelzahl (s. Schalter oben).
         var courseOids = parsed.ChapterList.SelectMany(c => c.ResponseLineList).Select(l => l.Oid).Distinct().ToList();
         var shared = await _lineCache.GetCachedOidsAsync(courseOids, request.Bid, ct);
         if (shared.Count < courseOids.Count)

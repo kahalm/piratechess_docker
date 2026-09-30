@@ -49,6 +49,7 @@ public class BrowserCourseAssemblerTests
     [InlineData("", false)]
     [InlineData("{\"x\":1}", false)]
     [InlineData("{\"game\":{\"data\":[", false)]
+    [InlineData("{\"game\":{},\"game\":{}}", false)]   // doppelter Schlüssel: nicht lesbar statt Ausnahme
     public void IsCacheableLine(string content, bool expected)
         => Assert.Equal(expected, BrowserCourseAssembler.IsCacheableLine(content));
 
@@ -62,6 +63,10 @@ public class BrowserCourseAssemblerTests
     [InlineData("{\"game\":{\"oid\":5}}", false)]
     [InlineData("{\"oid\":5,\"bid\":77}", false)]
     [InlineData("{\"game\":{\"oid\":5,\"bid\":77", false)]
+    // Doppelter Schlüssel (JsonObject wirft erst beim Aufzählen, ArgumentException): mehrdeutig → nicht teilen, nie werfen.
+    [InlineData("{\"game\":{\"oid\":5,\"oid\":6,\"bid\":77}}", false)]
+    [InlineData("{\"game\":{\"oid\":5,\"oid\":5,\"bid\":77}}", false)]
+    [InlineData("{\"game\":{\"oid\":5,\"bid\":77},\"game\":{\"oid\":5,\"bid\":77}}", false)]
     public void CarriesOwnIds_ComparesGameOidAndBid(string content, bool expected)
         => Assert.Equal(expected, BrowserCourseAssembler.CarriesOwnIds(content, 5, "77"));
 
@@ -83,6 +88,7 @@ public class BrowserCourseAssemblerTests
         Assert.Equal(2, BrowserCourseAssembler.CourseChapterCount("{\"course\":{\"data\":[{\"id\":1},{\"id\":2}]}}"));
         Assert.Null(BrowserCourseAssembler.CourseChapterCount("{\"nope\":1}"));
         Assert.Null(BrowserCourseAssembler.CourseChapterCount("kaputt"));
+        Assert.Null(BrowserCourseAssembler.CourseChapterCount("{\"course\":{\"data\":[]},\"course\":{\"data\":[]}}"));
     }
 
     [Fact]

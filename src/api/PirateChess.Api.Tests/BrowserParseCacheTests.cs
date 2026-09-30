@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using PirateChess.Api.Data;
 using PirateChess.Api.Models.Entities;
@@ -16,13 +18,21 @@ namespace PirateChess.Api.Tests;
 public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
 {
     private readonly TestWebApplicationFactory _factory;
+    // Der Kurs-Cache aus dem Browser ist standardmäßig aus (Chessable:BrowserCourseCacheEnabled, A3-002). Die Tests
+    // seiner übrigen Prüfungen laufen gegen diesen Host mit eingeschaltetem Schalter.
+    private readonly WebApplicationFactory<Program> _courseCacheOn;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
-    public BrowserParseCacheTests(TestWebApplicationFactory factory) => _factory = factory;
-
-    private HttpClient Client()
+    public BrowserParseCacheTests(TestWebApplicationFactory factory)
     {
-        var client = _factory.CreateClient();
+        _factory = factory;
+        _courseCacheOn = factory.WithWebHostBuilder(b => b.ConfigureAppConfiguration((_, config) =>
+            config.AddInMemoryCollection(new Dictionary<string, string?> { ["Chessable:BrowserCourseCacheEnabled"] = "true" })));
+    }
+
+    private HttpClient Client(WebApplicationFactory<Program>? host = null)
+    {
+        var client = (host ?? _factory).CreateClient();
         client.DefaultRequestHeaders.Add("X-Service-Key", "test-service-key");
         return client;
     }
@@ -71,16 +81,16 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
     private static object Chapter(string chapterJson, string?[] lines, string[]? oids)
         => new { ChapterJson = chapterJson, Lines = lines, LineOids = oids };
 
-    private async Task<CourseResp> ParseOkAsync(object payload)
+    private async Task<CourseResp> ParseOkAsync(object payload, WebApplicationFactory<Program>? host = null)
     {
-        var response = await Client().PostAsJsonAsync("/api/chessable/direct/course/parse", payload);
+        var response = await Client(host).PostAsJsonAsync("/api/chessable/direct/course/parse", payload);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts))!;
     }
 
-    private async Task SeedLineAsync(int oid, string json, string? bid = null)
+    private async Task SeedLineAsync(int oid, string json, string? bid = null, WebApplicationFactory<Program>? host = null)
     {
-        using var scope = _factory.Services.CreateScope();
+        using var scope = (host ?? _factory).Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         db.CachedRawLines.Add(new CachedRawLine { Oid = oid, LineJsonContent = GzipText.Compress(json), CachedAt = DateTime.UtcNow, Bid = bid });
         await db.SaveChangesAsync();
@@ -94,9 +104,9 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         return row is null ? null : GzipText.Decompress(row.LineJsonContent);
     }
 
-    private async Task<bool> CourseCachedAsync(string bid)
+    private async Task<bool> CourseCachedAsync(string bid, WebApplicationFactory<Program>? host = null)
     {
-        var body = await Client().GetFromJsonAsync<JsonElement>($"/api/chessable/direct/course/{bid}/cached", JsonOpts);
+        var body = await Client(host).GetFromJsonAsync<JsonElement>($"/api/chessable/direct/course/{bid}/cached", JsonOpts);
         return body.GetProperty("cached").GetBoolean();
     }
 
@@ -172,6 +182,22 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
     }
 
     [Fact]
+    public async Task Parse_LineWithDuplicateKeyInGame_Returns200_AndIsNotShared()
+    {
+        // Regression (Nacharbeit A3-002): ein doppelter Schlüssel im game-Objekt warf beim Aufzählen eine
+        // ArgumentException aus der Teilbarkeits-Prüfung — course/parse endete mit 500 statt 200.
+        const string duplicate =
+            "{\"game\":{\"oid\":6001,\"oid\":6001,\"bid\":6000,\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"col\":\"w\",\"san\":\"e4\"}]}}";
+        var body = await ParseOkAsync(new
+        {
+            Bid = "6000", Mode = "None",
+            Chapters = new[] { Chapter(ChapterJson((6001, "A")), new[] { duplicate }, new[] { "6001" }) }
+        });
+        Assert.Contains("[ChessableOid \"6001\"]", body.Pgn);   // der Einsender bekommt seine Linie
+        Assert.Null(await CachedRowAsync(6001));                 // mehrdeutige eigene Angaben → nicht geteilt
+    }
+
+    [Fact]
     public async Task Parse_FillsOnlyFromLinesOfTheSameCourse_OrLegacyLinesWithoutCourse()
     {
         // Begleitteil A3-001: eine oid ohne Inhalt wird nur aus einer Zeile desselben Kurses gefüllt.
@@ -225,9 +251,9 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         return body.GetProperty("oids").EnumerateArray().Select(e => e.GetString()!).ToList();
     }
 
-    private Task<CachedRawLine?> CachedRowAsync(int oid)
+    private Task<CachedRawLine?> CachedRowAsync(int oid, WebApplicationFactory<Program>? host = null)
     {
-        using var scope = _factory.Services.CreateScope();
+        using var scope = (host ?? _factory).Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         return Task.FromResult(db.CachedRawLines.FirstOrDefault(c => c.Oid == oid));
     }
@@ -298,42 +324,69 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
     private const string OneChapterCourse = "{\"course\":{\"data\":[{\"id\":1}]}}";
 
     [Fact]
-    public async Task Parse_CompleteCourse_BecomesCourseCache()
+    public async Task Parse_CompleteCourse_ByDefault_WritesOnlyTheLineCache_NoCourseCache()
     {
+        // A3-002: die Kapitelzahl eines Browser-Uploads ist eine Client-Angabe (s. KnownOpen-Test unten). Ohne
+        // Chessable:BrowserCourseCacheEnabled legt auch ein vollständig gemeldeter Kurs nur Linien ab.
         Assert.False(await CourseCachedAsync("3600"));
         await ParseOkAsync(new
         {
             Bid = "3600", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
             Chapters = new[] { Chapter(ChapterJson((3601, "A"), (3602, "B")), new[] { GameJson("e4", 3601, "3600"), GameJson("d4", 3602, "3600") }, new[] { "3601", "3602" }) }
         });
-        Assert.True(await CourseCachedAsync("3600"));
+        Assert.False(await CourseCachedAsync("3600"));
+        Assert.Equal("3600", (await CachedRowAsync(3601))!.Bid);
+        Assert.Equal("3600", (await CachedRowAsync(3602))!.Bid);
+    }
+
+    [Fact]
+    public async Task KnownOpen_WithSwitchOn_OneChunkAndInventedOneChapterCourseJson_BecomesCourseCacheOfTheWholeBid()
+    {
+        // CHARAKTERISIERUNG eines BEKANNT OFFENEN Rests (A3-002), darum der Schalter mit Standard „aus": ist der
+        // Browser-Kurs-Cache eingeschaltet, reichen EIN Chunk mit EINEM Kapitel, ein erfundenes courseJson mit einem
+        // Kapitel, Complete und selbstkonsistente (erfundene) Linien — der Kurs-Cache des GANZEN bids entsteht, und
+        // jeder Server-Import liefert diesen einen Kapitel-Kurs danach für alle als „vollständig". piratechess kann
+        // die Kapitelzahl ohne eigenen getCourse-Abruf nicht prüfen; die Linien-Prüfung zählt die im selben Aufruf
+        // abgelegten Linien mit. Wird das behoben, gehört dieser Test umgedreht.
+        await ParseOkAsync(new
+        {
+            Bid = "6100", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
+            Chapters = new[] { Chapter(ChapterJson((6101, "A"), (6102, "B")), new[] { GameJson("e4", 6101, "6100"), GameJson("d4", 6102, "6100") }, new[] { "6101", "6102" }) }
+        }, _courseCacheOn);
+
+        Assert.True(await CourseCachedAsync("6100", _courseCacheOn));
+        var course = await _courseCacheOn.Services.GetRequiredService<RawCourseCache>().GetAsync("6100");
+        Assert.Single(Assert.IsType<piratechess_lib.RestResponseCourse>(course).ChapterList);   // 1 Kapitel = „der ganze Kurs"
+        Assert.True((await CachedRowAsync(6101, _courseCacheOn))!.FromBrowser);   // Inhalt nur vom Client
     }
 
     [Fact]
     public async Task Parse_CompleteButLinesNotSharable_WritesNoCourseCache()
     {
-        // A3-002: EIN Kapitel, Complete und ein courseJson mit einem Kapitel erfüllten die Kapitelzahl-Prüfung —
-        // der ganze Kurs-Cache dieses bids entstand aus Client-Inhalt, den kein Linien-Check gesehen hatte.
+        // A3-002, Schalter an: eine Linie ohne eigene oid/bid kommt nicht in den geteilten Linien-Cache, also auch
+        // kein Kurs-Cache — sonst schriebe dessen Seeding den ungeprüften Client-Inhalt doch noch hinein. Das hält
+        // nur NICHT selbstkonsistente Linien fern; den Ein-Kapitel-Angriff mit selbstkonsistenten Linien behebt es
+        // NICHT (s. KnownOpen-Test oben, dagegen hilft nur der ausgeschaltete Schalter).
         await ParseOkAsync(new
         {
             Bid = "5400", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
             Chapters = new[] { Chapter(ChapterJson((5401, "A"), (5402, "B")), new[] { LineJson("e4"), GameJson("d4", 5402, "5400") }, new[] { "5401", "5402" }) }
-        });
-        Assert.False(await CourseCachedAsync("5400"));
-        Assert.Null(await CachedRowAsync(5401));
+        }, _courseCacheOn);
+        Assert.False(await CourseCachedAsync("5400", _courseCacheOn));
+        Assert.Null(await CachedRowAsync(5401, _courseCacheOn));
     }
 
     [Fact]
     public async Task Parse_CompleteButALineBelongsToAnotherCourse_WritesNoCourseCache()
     {
-        await SeedLineAsync(5501, LineJson("c4"), bid: "7777");
+        await SeedLineAsync(5501, LineJson("c4"), bid: "7777", host: _courseCacheOn);
         await ParseOkAsync(new
         {
             Bid = "5500", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
             Chapters = new[] { Chapter(ChapterJson((5501, "A"), (5502, "B")), new[] { GameJson("e4", 5501, "5500"), GameJson("d4", 5502, "5500") }, new[] { "5501", "5502" }) }
-        });
-        Assert.False(await CourseCachedAsync("5500"));
-        Assert.Equal("7777", (await CachedRowAsync(5501))!.Bid);   // vorhandene Zeile unberührt
+        }, _courseCacheOn);
+        Assert.False(await CourseCachedAsync("5500", _courseCacheOn));
+        Assert.Equal("7777", (await CachedRowAsync(5501, _courseCacheOn))!.Bid);   // vorhandene Zeile unberührt
     }
 
     [Fact]
@@ -343,8 +396,8 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         {
             Bid = "3700", Mode = "None", CourseJson = OneChapterCourse, Complete = false,
             Chapters = new[] { Chapter(ChapterJson((3701, "A"), (3702, "B")), new[] { GameJson("e4", 3701, "3700"), GameJson("d4", 3702, "3700") }, new[] { "3701", "3702" }) }
-        });
-        Assert.False(await CourseCachedAsync("3700"));
+        }, _courseCacheOn);
+        Assert.False(await CourseCachedAsync("3700", _courseCacheOn));
     }
 
     [Fact]
@@ -354,8 +407,8 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         {
             Bid = "3800", Mode = "None", CourseJson = OneChapterCourse, Complete = true,
             Chapters = new[] { Chapter(ChapterJson((3801, "A"), (3802, "B")), new[] { GameJson("e4", 3801, "3800"), null }, new[] { "3801", "3802" }) }
-        });
-        Assert.False(await CourseCachedAsync("3800"));
+        }, _courseCacheOn);
+        Assert.False(await CourseCachedAsync("3800", _courseCacheOn));
     }
 
     [Fact]
@@ -365,8 +418,21 @@ public class BrowserParseCacheTests : IClassFixture<TestWebApplicationFactory>
         {
             Bid = "3900", Mode = "None", CourseJson = "{\"course\":{\"data\":[{\"id\":1},{\"id\":2}]}}", Complete = true,
             Chapters = new[] { Chapter(ChapterJson((3901, "A"), (3902, "B")), new[] { GameJson("e4", 3901, "3900"), GameJson("d4", 3902, "3900") }, new[] { "3901", "3902" }) }
+        }, _courseCacheOn);
+        Assert.False(await CourseCachedAsync("3900", _courseCacheOn));
+    }
+
+    [Fact]
+    public async Task Parse_CourseJsonWithDuplicateKey_Returns200_AndWritesNoCourseCache()
+    {
+        // Nacharbeit A3-002: ein doppelter Schlüssel im courseJson darf den schon geparsten Import nicht kippen.
+        var response = await Client(_courseCacheOn).PostAsJsonAsync("/api/chessable/direct/course/parse", new
+        {
+            Bid = "6200", Mode = "None", CourseJson = "{\"course\":{\"data\":[{\"id\":1}]},\"course\":{\"data\":[]}}", Complete = true,
+            Chapters = new[] { Chapter(ChapterJson((6201, "A")), new[] { GameJson("e4", 6201, "6200") }, new[] { "6201" }) }
         });
-        Assert.False(await CourseCachedAsync("3900"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(await CourseCachedAsync("6200", _courseCacheOn));
     }
 
     [Theory]

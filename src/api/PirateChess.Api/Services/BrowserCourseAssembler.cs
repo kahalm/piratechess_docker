@@ -94,7 +94,7 @@ public static class BrowserCourseAssembler
                 return false;
             return ReadNumber(Property(game, "oid")) == oid && ReadNumber(Property(game, "bid")) == expectedBid;
         }
-        catch (JsonException) { return false; }
+        catch (Exception ex) when (IsMalformedJson(ex)) { return false; }
     }
 
     /// <summary>
@@ -164,7 +164,7 @@ public static class BrowserCourseAssembler
         {
             return JsonNode.Parse(content) is JsonObject obj && Property(obj, "game") is JsonObject;
         }
-        catch (JsonException) { return false; }
+        catch (Exception ex) when (IsMalformedJson(ex)) { return false; }
     }
 
     /// <summary>Kapitelzahl einer getCourse-Antwort, <c>null</c> wenn sie nicht lesbar ist.</summary>
@@ -176,8 +176,16 @@ public static class BrowserCourseAssembler
             if (Property(root, "course") is not JsonObject course) return null;
             return Property(course, "data") is JsonArray data ? data.Count : null;
         }
-        catch (JsonException) { return null; }
+        catch (Exception ex) when (IsMalformedJson(ex)) { return null; }
     }
+
+    /// <summary>
+    /// Unbrauchbares Client-JSON: ein Syntaxfehler (<see cref="JsonException"/>) oder ein doppelter Schlüssel, den
+    /// <see cref="JsonObject"/> erst beim Aufzählen meldet (<see cref="ArgumentException"/>, je nach Weg auch
+    /// <see cref="InvalidOperationException"/>). Beides heißt „nicht lesbar", nie „Anfrage scheitert".
+    /// </summary>
+    private static bool IsMalformedJson(Exception ex)
+        => ex is JsonException or ArgumentException or InvalidOperationException;
 
     private static (JsonObject? ListObj, string? DataName, JsonArray? Data) FindData(JsonNode? root)
     {
