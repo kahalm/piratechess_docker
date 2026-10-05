@@ -22,10 +22,54 @@ namespace piratechess_lib
         /// Aufrufer (PirateChessLib.GetLine) meldet das via RecordError/Diag, damit die Korruption
         /// nicht als sauberer Export durchrutscht.</summary>
         public int DuplicateMoveIds { get; private set; }
+        /// <summary>
+        /// Stellung VOR jedem Zug der Linie — die Ankerpunkte für Varianten (siehe
+        /// <see cref="JsonMoveItemList.GetVariationParts"/>). Chessable liefert sie im „before" des Zuges;
+        /// fehlt sie (erster Zug einer Linie hat oft gar kein „after"-Objekt), wird sie aus der
+        /// Ausgangsstellung nachgespielt. Was sich nicht nachspielen lässt, bleibt leer — dann gibt es für
+        /// diesen Zug eben keinen Ersatz-Anker.
+        /// </summary>
+        private static List<string> MainlineFens(SortedList<int, JsonMove> moves, Dictionary<int, ResponseMove> afterByMoveId, string? initial)
+        {
+            var fens = new List<string>(moves.Count);
+            ChessGame? game = TryNewGame(string.IsNullOrWhiteSpace(initial) ? StartFen : initial);
+            for (int i = 0; i < moves.Count; i++)
+            {
+                string fromJson = afterByMoveId.TryGetValue(moves.Keys[i], out var r) ? (r.Before ?? "") : "";
+                fens.Add(fromJson != "" ? fromJson : (game?.GetFen() ?? ""));
+
+                var move = moves.Values[i];
+                if (game == null) continue;
+                if (IsNullSan(move.San)) { game = null; continue; }   // ab hier ist die Stellung nicht mehr sicher
+                var candidates = SanCandidates(game, (move.San ?? "").Trim());
+                if (candidates.Count != 1) { game = null; continue; }
+                try { game.MakeMove(candidates[0], false); }
+                catch { game = null; }
+            }
+            return fens;
+        }
+
+        /// <summary>Ausgangsstellung einer Partie — Rückfall, wenn die Linie keine eigene FEN nennt.</summary>
+        private const string StartFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+        /// <summary>Brett aus einer FEN, ohne zu werfen (Chessable liefert auch Muster-Diagramme ohne König).</summary>
+        private static ChessGame? TryNewGame(string? fen)
+        {
+            try { return string.IsNullOrWhiteSpace(fen) ? new ChessGame() : new ChessGame(fen); }
+            catch { return null; }
+        }
+
+        /// <summary>Chessables Platzhalter für „kein Zug" (Einleitungs-/Erklärlinien) — auch ein leeres San.</summary>
+        private static bool IsNullSan(string? san) => (san ?? "").Trim() is "" or "--";
+
+        /// <summary>Zwei Kommentare ohne Zug dazwischen („} {") — siehe <see cref="GeneratePGN"/>.</summary>
+        private static readonly Regex CommentGap = new(@"\}\s*\{", RegexOptions.Compiled);
+
         public string GeneratePGN(bool allKeyMovesTraining = false, bool noTrainingMove = false)
         {
             string pgn = "";
             SortedList<int, JsonMove> sortedMoves = [];
+            var afterByMoveId = new Dictionary<int, ResponseMove>();
             Data ??= [];
             DuplicateMoveIds = 0;
             foreach (JsonMove move in Data)
@@ -41,24 +85,11 @@ namespace piratechess_lib
                     ResponseMove? responseMoveAfter = JsonSerializer.Deserialize<ResponseMove>(move.After, options: Options.GetOptions());
                     if (responseMoveAfter != null && responseMoveAfter.Data != null)
                     {
-                        var comments = new List<string>();
-                        var variations = new List<string>();
-                        foreach (var data in responseMoveAfter.Data)
-                        {
-                            if (data.Key == "C")
-                            {
-                                string c = data.CommentAfter;
-                                if (c != "") comments.Add(c);
-                            }
-                            else if (data.Key == "V")
-                            {
-                                // Anknüpfpunkt der Variante = Stellung VOR diesem Zug (Alternative zu ihm).
-                                string v = data.GetVariationPgn(responseMoveAfter.Before);
-                                if (v != "") variations.Add(v);
-                            }
-                        }
-                        move.CommentAfter = string.Join(" ", comments);
-                        move.CommentVariations = string.Join(" ", variations);
+                        afterByMoveId[move.Id] = responseMoveAfter;
+                        move.CommentAfter = string.Join(" ", responseMoveAfter.Data
+                            .Where(d => d.Key == "C")
+                            .Select(d => d.CommentAfter)
+                            .Where(c => c != ""));
                     }
                 }
 
@@ -141,6 +172,27 @@ namespace piratechess_lib
                     : "[%info]\n" + firstMove.CommentBefore;
             }
 
+            // Varianten ERST JETZT, wenn alle Stellungen der Linie bekannt sind: ein Cluster, der von
+            // seinem Elternzug aus nicht spielbar ist, hängt sich an die Stellung, zu der seine Zugnummer
+            // passt (siehe GetVariationParts). Chessable hängt die Verweis-Linien einer Einleitung an den
+            // Null-Zug am Ende — von dort unspielbar, ab Zug 1 aber ganz normale Varianten.
+            var anchorFens = MainlineFens(sortedMoves, afterByMoveId, Initial);
+            var variationsAt = anchorFens.Select(_ => new List<string>()).ToList();
+            for (int i = 0; i < sortedMoves.Count; i++)
+            {
+                if (!afterByMoveId.TryGetValue(sortedMoves.Keys[i], out var resp) || resp.Data == null) continue;
+                foreach (var data in resp.Data.Where(d => d.Key == "V"))
+                {
+                    foreach (var (anchor, part) in data.GetVariationParts(resp.Before ?? "", anchorFens))
+                    {
+                        if (part == "") continue;
+                        variationsAt[anchor >= 0 && anchor < variationsAt.Count ? anchor : i].Add(part);
+                    }
+                }
+            }
+            for (int i = 0; i < sortedMoves.Count; i++)
+                sortedMoves.Values[i].CommentVariations = string.Join(" ", variationsAt[i]);
+
             int lastMove = 0;
             // Vollzugnummer des Linienbeginns — softFail ist ab da 0-basiert indiziert.
             int firstMoveNum = sortedMoves.Count > 0 ? sortedMoves.Values.First().Move : 1;
@@ -148,27 +200,46 @@ namespace piratechess_lib
             // beginnt oder direkt nach Varianten zieht (sonst ordnet ein strenger PGN-Leser den Zug nicht zu).
             var initialParts = (Initial ?? "").Split(' ');
             bool blackStarts = initialParts.Length > 1 && initialParts[1] == "b";
-            bool afterVariations = false;
-            foreach (JsonMove move in sortedMoves.Values)
+            // Chessables NULL-ZUG („--") steht am ENDE von Einleitungs-/Erklärlinien, wo kein Zug mehr folgt.
+            // Er wird nicht ausgegeben: chess.js — der PGN-Leser von RookHubs Viewer, Zugliste und
+            // Repertoire-Ansicht — kennt ihn nicht und verwirft damit die GANZE Partie stillschweigend
+            // (auf Dev 85 von 1715 Linien). Seine Kommentare bleiben erhalten und hängen am Zug davor.
+            // Nur am Ende: folgt noch ein echter Zug, wäre die Zugfolge ohne Platzhalter falsch, dann bleibt
+            // es beim „--" (in echten Daten nie vorgekommen).
+            var trailingNullIds = new HashSet<int>();
+            for (int i = sortedMoves.Count - 1; i >= 0; i--)
             {
+                if (!IsNullSan(sortedMoves.Values[i].San)) break;
+                trailingNullIds.Add(sortedMoves.Keys[i]);
+            }
+
+            bool afterVariations = false;
+            foreach (var moveEntry in sortedMoves)
+            {
+                JsonMove move = moveEntry.Value;
+                bool nullMove = trailingNullIds.Contains(moveEntry.Key);
+
                 if (move.CommentBefore != "")
                 {
                     pgn += $"{{{move.CommentBefore}}} ";
                 }
 
-                if (lastMove < move.Move)
+                if (!nullMove)
                 {
-                    pgn += lastMove == 0 && blackStarts ? $"{move.Move}... " : $"{move.Move}. ";
+                    if (lastMove < move.Move)
+                    {
+                        pgn += lastMove == 0 && blackStarts ? $"{move.Move}... " : $"{move.Move}. ";
+                    }
+                    else if (afterVariations)
+                    {
+                        pgn += $"{move.Move}... ";
+                    }
+                    // San geht roh in den Movetext: was kein SAN-Zug ist (Zeilenumbruch + „[Event …]" aus einer
+                    // vergifteten Cache-Linie), verwirft die ganze Linie — GetLine überspringt und meldet sie (S2-017).
+                    if (!string.IsNullOrEmpty(move.San) && !PgnTokenGuard.IsSan(move.San))
+                        throw new FormatException($"Zug-Id {move.Id}: San ist kein SAN-Zug — Linie verworfen (korrupte oder manipulierte Daten)");
+                    pgn += move.San + " ";
                 }
-                else if (afterVariations)
-                {
-                    pgn += $"{move.Move}... ";
-                }
-                // San geht roh in den Movetext: was kein SAN-Zug ist (Zeilenumbruch + „[Event …]" aus einer
-                // vergifteten Cache-Linie), verwirft die ganze Linie — GetLine überspringt und meldet sie (S2-017).
-                if (!string.IsNullOrEmpty(move.San) && !PgnTokenGuard.IsSan(move.San))
-                    throw new FormatException($"Zug-Id {move.Id}: San ist kein SAN-Zug — Linie verworfen (korrupte oder manipulierte Daten)");
-                pgn += move.San + " ";
 
                 // Chessable kann "draws": null bzw. einzelne null-Eintraege liefern; das Property-Pattern
                 // filtert null-Elemente mit aus (NullRef in GeneratePGN, bid 282212). Farbe/Felder gehen roh in
@@ -244,8 +315,15 @@ namespace piratechess_lib
                 }
                 afterVariations = move.CommentVariations != "";
 
-                lastMove = move.Move;
+                if (!nullMove) lastMove = move.Move;
             }
+
+            // Zwei Kommentare direkt hintereinander zu EINEM zusammenfassen: chess.js lehnt „{a} {b}" ab und
+            // verwirft die Partie. Sie entstehen, wenn aus einer nicht spielbaren Variante ein Kommentar wird
+            // (GetVariationPgn) oder wenn hinter dem letzten Zug mehrere Blöcke zusammenkommen. Ein „}" kann
+            // nicht aus dem Chessable-Text stammen (ReplaceCommentStuff ersetzt geschweifte Klammern), die
+            // Fundstelle ist also eindeutig.
+            pgn = CommentGap.Replace(pgn, " ");
             return pgn;
         }
 
@@ -535,10 +613,24 @@ namespace piratechess_lib
         /// <c>(…)</c>-Variante; sonst (illegaler Zug / Nullzug / unbekannte FEN) → als <c>{Kommentar}</c>
         /// ausgegeben, damit das PGN gültig bleibt und der Inhalt erhalten bleibt.
         /// </summary>
-        public string GetVariationPgn(string branchFen)
+        public string GetVariationPgn(string branchFen) =>
+            string.Join(" ", GetVariationParts(branchFen, []).Select(p => p.Pgn));
+
+        /// <summary>
+        /// Wie <see cref="GetVariationPgn(string)"/>, erlaubt aber ERSATZ-ANKER: Ist ein Cluster von der
+        /// Elternstellung aus nicht spielbar, wird die Stellung gesucht, zu der seine ZUGNUMMER passt
+        /// (<paramref name="anchorFens"/>[i] = Stellung vor Zug i der Linie). Das sind die
+        /// Transpositions-/Verweis-Notizen, die Chessable an den Null-Zug am Ende einer Einleitungslinie
+        /// hängt: von dort aus unspielbar, ab der Stellung ihrer Zugnummer aber ganz normale Varianten.
+        /// Ohne das landete der halbe Einleitungstext als Kommentar im PGN — in ChessBase nicht anklickbar.
+        /// <para>Rückgabe je Cluster: <c>Anchor</c> = Index in <paramref name="anchorFens"/>, an dem die
+        /// Variante hängen MUSS, oder -1 für die Elternstellung (auch bei der Kommentar-Notlösung).</para>
+        /// </summary>
+        public List<(int Anchor, string Pgn)> GetVariationParts(string branchFen, IReadOnlyList<string> anchorFens)
         {
+            var result = new List<(int Anchor, string Pgn)>();
             if (Key != "V" || Val == null || Val.Value.ValueKind != JsonValueKind.Array)
-                return "";
+                return result;
 
             var innerList = JsonSerializer.Deserialize<List<JsonMoveItemList>>(Val.Value, options: Options.GetOptions()) ?? [];
 
@@ -562,19 +654,46 @@ namespace piratechess_lib
                         }
                         lastOrder = ord.Value;
                     }
+                    else if (lastOrder != int.MinValue)
+                    {
+                        // Ein Zug OHNE Nummer setzt die Folge fort und belegt damit den nächsten Halbzug.
+                        // Ohne dieses Mitzählen sah „… 3.Nc3 a6 … 3...h6" wie eine Fortsetzung aus (7 > 6),
+                        // obwohl „a6" den Halbzug 7 schon belegt — der ganze Block wurde ein Kommentar.
+                        lastOrder++;
+                    }
                 }
                 cur.Add(item);
             }
             if (cur.Count > 0) clusters.Add(cur);
 
             // ---- Phase 2: jeden Cluster nachspielen → Variante oder Kommentar ----
-            var parts = new List<string>();
             foreach (var cluster in clusters)
             {
                 // Erst die Züge: eine Variante wird der Cluster nur, wenn JEDER Zug eindeutig spielbar ist.
                 var raws = cluster.Where(it => it.Key == "S").Select(SanTextOf).Where(r => r != "").ToList();
                 bool hasNull = raws.Any(r => r.Contains("--"));
                 List<string>? moves = raws.Count > 0 && !hasNull ? ResolveLine(branchFen, raws, 0) : null;
+                int anchor = -1;
+
+                // Nicht von hier spielbar? Dann die Stellung suchen, zu der die ZUGNUMMER des ersten Zuges
+                // passt (Vollzugzahl + Farbe müssen stimmen — ohne diese Bedingung würde ein zufällig
+                // legaler Zug irgendwo anders angehängt).
+                if (moves == null && !hasNull && raws.Count > 0 && anchorFens.Count > 0)
+                {
+                    int? ord = MoveOrder(raws[0]);
+                    if (ord.HasValue)
+                    {
+                        for (int a = 0; a < anchorFens.Count; a++)
+                        {
+                            if (!FenHasOrder(anchorFens[a], ord.Value)) continue;
+                            var tryMoves = ResolveLine(anchorFens[a], raws, 0);
+                            if (tryMoves == null) continue;
+                            moves = tryMoves;
+                            anchor = a;
+                            break;
+                        }
+                    }
+                }
 
                 var body = new StringBuilder();         // gültige Varianten-Notation
                 var rawText = new StringBuilder();       // Fallback-Klartext (Kommentar)
@@ -606,15 +725,25 @@ namespace piratechess_lib
                 if (moves != null)
                 {
                     string b = body.ToString().Trim();
-                    if (b != "") parts.Add($"({b})");
+                    if (b != "") result.Add((anchor, $"({b})"));
                 }
                 else
                 {
                     string t = rawText.ToString().Trim();
-                    if (t != "") parts.Add($"{{{t}}}");
+                    if (t != "") result.Add((-1, $"{{{t}}}"));
                 }
             }
-            return string.Join(" ", parts);
+            return result;
+        }
+
+        /// <summary>Passt die Stellung zur Zugnummer eines Tokens (<see cref="MoveOrder"/>: weiß = N·2,
+        /// schwarz = N·2+1)? Gelesen wird nur die FEN selbst — Vollzugzahl und Seite am Zug.</summary>
+        private static bool FenHasOrder(string fen, int order)
+        {
+            var parts = (fen ?? "").Split(' ');
+            if (parts.Length < 6) return false;
+            if (!int.TryParse(parts[5], out int fullmove)) return false;
+            return fullmove * 2 + (parts[1] == "b" ? 1 : 0) == order;
         }
 
         /// <summary>Höchstzahl Halbzüge, die <see cref="ResolveLine"/> für EINEN Varianten-Cluster nachspielt (= Rekursionstiefe).
@@ -747,7 +876,10 @@ namespace piratechess_lib
 
         private static void AppendText(StringBuilder sb, string s)
         {
-            if (sb.Length > 0) sb.Append(' ');
+            // Kein Leerzeichen vor einem Satzzeichen: der Klartext eines Clusters entsteht aus Zügen und
+            // Textstücken, und ein Stück, das mit „." oder „," beginnt, gehört an das Wort davor
+            // („1.d4 . And maybe this is true." → „1.d4. And maybe this is true.").
+            if (sb.Length > 0 && !(s.Length > 0 && ",.;:!?)".Contains(s[0]))) sb.Append(' ');
             sb.Append(s);
         }
 

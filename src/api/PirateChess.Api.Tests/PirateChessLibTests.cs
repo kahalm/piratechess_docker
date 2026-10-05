@@ -304,6 +304,146 @@ public class PirateChessLibTests
         return game.GeneratePGN(noTrainingMove: true);
     }
 
+    // ---- Chessables Null-Zug in der HAUPTlinie + Kommentar-Form ------------
+    // Einleitungs-/Erklärlinien enden bei Chessable mit dem Null-Zug „--". Er darf nicht im Movetext
+    // stehen: chess.js (RookHub-Viewer, Zugliste, Repertoire-Ansicht) kennt ihn nicht und verwirft die
+    // GANZE Partie stillschweigend. Sein Kommentar muss trotzdem erhalten bleiben.
+    private static string AfterWithItems(string beforeFen, string itemsJson) =>
+        $"{{\"before\":\"{beforeFen}\",\"after\":\"\",\"data\":[{itemsJson}]}}";
+
+    private static string CommentItem(string text) => $"{{\"key\":\"C\",\"state\":\"\",\"val\":\"{text}\"}}";
+
+    private static string VariationItem(params (string key, string val)[] items)
+    {
+        var inner = string.Join(",", items.Select(it => $"{{\"key\":\"{it.key}\",\"state\":\"\",\"val\":\"{it.val}\"}}"));
+        return $"{{\"key\":\"V\",\"state\":\"\",\"val\":[{inner}]}}";
+    }
+
+    [Fact]
+    public void GetVariationParts_UnplayableHere_AnchoredAtItsOwnMoveNumber()
+    {
+        // Chessable hängt die Verweis-Linien einer Einleitung an den Null-Zug am Ende: von dort aus
+        // (Schwarz am Zug nach 1.e4) ist „1.e4 e5 2.Nf3 …" nicht spielbar. Früher wurde daraus ein
+        // Kommentar — in ChessBase bloder Text. Jetzt hängt die Variante an Zug 1.
+        const string afterE4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, Col = "w", San = "e4" },
+                new JsonMove { Id = 1, Move = 1, Col = "b", San = "--",
+                    After = AfterWithItems(afterE4, VariationItem(("C", "• Against"), ("S", "1.e4"), ("S", "e5"),
+                        ("C", "we will play"), ("S", "2.Nf3"), ("S", "Nc6"), ("S", "3.Bb5"), ("C", "and the main lines."))) },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Contains("1. e4 ({• Against} 1.e4 e5 {we will play} 2.Nf3 Nc6 3.Bb5 {and the main lines.})", pgn);
+    }
+
+    [Fact]
+    public void GetVariationParts_NoAnchorWithMatchingMoveNumber_StaysComment()
+    {
+        // Ersatz-Anker nur, wenn Vollzugzahl UND Farbe passen — sonst hängt eine Notiz an einer Stellung,
+        // an der sie zufällig legal ist. „7.Ra2" passt zu keiner Stellung dieser kurzen Linie.
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, Col = "w", San = "e4" },
+                new JsonMove { Id = 1, Move = 1, Col = "b", San = "--",
+                    After = AfterWithItems("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+                        VariationItem(("S", "7.Ra2"))) },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.DoesNotContain("(7.Ra2", pgn);
+        Assert.Contains("{7.Ra2}", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_UnnumberedMovesCountTowardsTheSplit()
+    {
+        // „… 3.Nc3 a6 und sogar 3...h6": „a6" ist schon Schwarz' dritter Zug, „3...h6" ist also eine
+        // ALTERNATIVE und kein Folgezug. Ohne Mitzählen der Züge ohne Nummer blieb alles ein Cluster —
+        // nicht spielbar, und der ganze Block wurde ein Kommentar.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen,
+            ("S", "1.d4"), ("S", "d5"), ("S", "2.c4"), ("S", "e6"), ("S", "3.Nc3"), ("S", "a6"),
+            ("C", "und sogar"), ("S", "3...h6")));
+
+        Assert.Contains("(1.d4 d5 2.c4 e6 3.Nc3 a6 {und sogar})", pgn);
+        Assert.Contains("{3...h6}", pgn);
+    }
+
+    [Fact]
+    public void GeneratePGN_TrailingNullMove_OmittedButCommentKept()
+    {
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "e4" },
+                new JsonMove { Id = 1, Move = 1, San = "--", After = AfterWithItems(StartFen, CommentItem("Hier geht es weiter.")) },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.DoesNotContain("--", pgn);          // chess.js würde daran die ganze Partie verwerfen
+        Assert.DoesNotContain("1...", pgn);        // auch die Zugnummer des Null-Zugs fällt weg
+        Assert.Contains("1. e4", pgn);
+        Assert.Contains("Hier geht es weiter.", pgn);
+    }
+
+    [Fact]
+    public void GeneratePGN_NullMoveFollowedByRealMove_KeepsPlaceholder()
+    {
+        // Nur der Null-Zug am ENDE fällt weg — mitten in der Linie wäre die Zugfolge ohne Platzhalter falsch.
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, San = "e4" },
+                new JsonMove { Id = 1, Move = 1, San = "--" },
+                new JsonMove { Id = 2, Move = 2, San = "e5" },
+            ],
+        };
+
+        Assert.Contains("--", game.GeneratePGN(noTrainingMove: true));
+    }
+
+    [Fact]
+    public void GeneratePGN_CommentAndCommentedVariation_MergedIntoOneComment()
+    {
+        // „{a} {b}" lehnt chess.js ab. Hier trifft der Zug-Kommentar auf eine Variante, die als Kommentar
+        // gerendert wird (nicht nachspielbar) — beides gehört in EINEN Kommentar.
+        var after = AfterWithItems(StartFen, CommentItem("Ein Hinweis.") + "," + VariationItem(("S", "3...Bb7"), ("S", "4.e3")));
+        var game = new Game { Initial = StartFen, Data = [ new JsonMove { Id = 0, Move = 1, San = "e4", After = after } ] };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.DoesNotContain("} {", pgn);
+        Assert.Contains("{Ein Hinweis. 3...Bb7 4.e3}", pgn);
+    }
+
+    [Fact]
+    public void GetVariationPgn_CommentStartingWithPunctuation_NoSpaceBeforeIt()
+    {
+        // Aus der Einleitung eines echten Kurses: „1.d4 . And maybe this is true." — das Satzzeichen
+        // gehört an den Zug davor, nicht hinter ein Leerzeichen.
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen, ("S", "3...Bb7"), ("C", ". Soweit die Theorie.")));
+
+        Assert.Contains("{3...Bb7. Soweit die Theorie.}", pgn);
+        Assert.DoesNotContain("Bb7 .", pgn);
+    }
+
     [Fact]
     public void GetVariationPgn_LegalSideline_RenderedAsPlayableVariation()
     {
@@ -666,8 +806,11 @@ public class PirateChessLibTests
         var pgn = game.GeneratePGN(noTrainingMove: true);
 
         Assert.StartsWith("{willkommen zum ersten Kapitel. Es gibt nichts, wenn er 2.d4 spielen kann. Alles außer 2.d4.} 1. e4 ", pgn);
-        Assert.Contains("3. e5 (3.Nc3 Nf6 {werden wir später sehen.}) (3.d3 {ist hier in der Zugfolge}) "
-            + "{2.d3 d5 3.Nf3 analysiert.} 3... c5 4. b4", pgn);
+        Assert.Contains("3. e5 (3.Nc3 Nf6 {werden wir später sehen.}) (3.d3 {ist hier in der Zugfolge}) 3... c5 4. b4", pgn);
+        // Die Transpositions-Notiz „2.d3 d5 3.Nf3" ist von 3.e5 aus nicht spielbar. Sie landet deshalb
+        // nicht mehr als Kommentar im PGN, sondern als echte — und damit anklickbare — Variante an dem
+        // Zug, zu dem ihre Zugnummer passt (2.Sf3).
+        Assert.Contains("2. Nf3 (2.d3 d5 3.Nf3 {analysiert.}) 2... d5", pgn);
         Assert.DoesNotContain("\n", pgn);
         Assert.DoesNotContain("  ", pgn.TrimEnd());
     }
@@ -752,15 +895,26 @@ public class PirateChessLibTests
     [InlineData("O-O")]
     [InlineData("O-O-O+")]
     [InlineData("0-0")]
-    [InlineData("--")]
     [InlineData("Nf3!?")]
     [InlineData("Qxf7#!")]
-    [InlineData("")]        // leer ist harmlos und war schon immer möglich (Verhalten unverändert)
     public void GeneratePGN_SanForms_Accepted(string san)
     {
         var game = new Game { Initial = "", Data = [ new JsonMove { Id = 0, Move = 1, Col = "w", San = san } ] };
 
         Assert.Equal($"1. {san} ", game.GeneratePGN(noTrainingMove: true));
+    }
+
+    // „--" (Null-Zug) und ein leeres San sind kein Zug: sie stehen am Ende von Einleitungslinien und
+    // fallen aus dem Movetext (chess.js verwirft sonst die ganze Partie). Eine Linie, die NUR daraus
+    // besteht, hat damit keinen Zugtext mehr — ihre Kommentare bleiben erhalten (eigener Test).
+    [Theory]
+    [InlineData("--")]
+    [InlineData("")]
+    public void GeneratePGN_OnlyNullMove_EmptyMovetext(string san)
+    {
+        var game = new Game { Initial = "", Data = [ new JsonMove { Id = 0, Move = 1, Col = "w", San = san } ] };
+
+        Assert.Equal("", game.GeneratePGN(noTrainingMove: true));
     }
 
     [Theory]
