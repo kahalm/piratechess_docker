@@ -376,8 +376,23 @@ public class PirateChessLibTests
             ("S", "1.d4"), ("S", "d5"), ("S", "2.c4"), ("S", "e6"), ("S", "3.Nc3"), ("S", "a6"),
             ("C", "und sogar"), ("S", "3...h6")));
 
-        Assert.Contains("(1.d4 d5 2.c4 e6 3.Nc3 a6 {und sogar})", pgn);
-        Assert.Contains("{3...h6}", pgn);
+        // „3...h6" ist die Alternative zu „a6" und hängt deshalb als Unter-Variante an genau dieser
+        // Stelle — nicht als Satzfetzen am Ende der Linie.
+        Assert.Contains("(1.d4 d5 2.c4 e6 3.Nc3 a6 {und sogar} (3...h6))", pgn);
+    }
+
+    [Fact]
+    public void GetVariationParts_AlternativeInsidePreviousVariation_BecomesNestedVariation()
+    {
+        // Die Fortsetzung eines V-Blocks ist oft die Alternative zu einem Zug der VORANGEGANGENEN
+        // Variante („… 7.f4 7...Le7 … 7...Db6 ist ,best'"). Gesammelt am Ende der Linie ergaben solche
+        // Stücke aneinandergereihte Satzfetzen ohne Zusammenhang (vom Nutzer gemeldet).
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen,
+            ("S", "1.d4"), ("S", "d5"), ("S", "2.c4"), ("C", "Damengambit."), ("S", "e6"),
+            ("C", "Solide."), ("S", "2...c6"), ("C", "Slawisch.")));
+
+        // Der Kommentar bleibt beim Zug, die Alternative hängt dahinter.
+        Assert.Contains("(1.d4 d5 2.c4 {Damengambit.} e6 {Solide.} (2...c6 {Slawisch.}))", pgn);
     }
 
     [Fact]

@@ -666,74 +666,170 @@ namespace piratechess_lib
             }
             if (cur.Count > 0) clusters.Add(cur);
 
-            // ---- Phase 2: jeden Cluster nachspielen → Variante oder Kommentar ----
+            // ---- Phase 2: jeden Cluster nachspielen → Variante, Unter-Variante oder Kommentar ----
+            var rendered = new List<RenderedCluster>();   // schon gebaute Varianten DIESES V-Blocks
+            var entries = new List<(int Anchor, RenderedCluster? Cluster, string Text)>();
+
             foreach (var cluster in clusters)
             {
                 // Erst die Züge: eine Variante wird der Cluster nur, wenn JEDER Zug eindeutig spielbar ist.
                 var raws = cluster.Where(it => it.Key == "S").Select(SanTextOf).Where(r => r != "").ToList();
                 bool hasNull = raws.Any(r => r.Contains("--"));
-                List<string>? moves = raws.Count > 0 && !hasNull ? ResolveLine(branchFen, raws, 0) : null;
-                int anchor = -1;
+                int? ord = raws.Count > 0 ? MoveOrder(raws[0]) : null;
 
-                // Nicht von hier spielbar? Dann die Stellung suchen, zu der die ZUGNUMMER des ersten Zuges
-                // passt (Vollzugzahl + Farbe müssen stimmen — ohne diese Bedingung würde ein zufällig
-                // legaler Zug irgendwo anders angehängt).
-                if (moves == null && !hasNull && raws.Count > 0 && anchorFens.Count > 0)
+                string? usedFen = branchFen;
+                int anchor = -1;
+                RenderedCluster? host = null;
+                int hostSpot = -1;
+                List<string>? moves = raws.Count > 0 && !hasNull ? ResolveLine(branchFen, raws, 0) : null;
+
+                // (1) Nicht von hier spielbar? Dann die Stellung der HAUPTLINIE suchen, zu der die
+                // ZUGNUMMER des ersten Zuges passt (Vollzugzahl + Farbe müssen stimmen — ohne diese
+                // Bedingung würde ein zufällig legaler Zug irgendwo anders angehängt).
+                if (moves == null && !hasNull && ord.HasValue)
                 {
-                    int? ord = MoveOrder(raws[0]);
-                    if (ord.HasValue)
+                    for (int a = 0; a < anchorFens.Count; a++)
                     {
-                        for (int a = 0; a < anchorFens.Count; a++)
+                        if (!FenHasOrder(anchorFens[a], ord.Value)) continue;
+                        var tryMoves = ResolveLine(anchorFens[a], raws, 0);
+                        if (tryMoves == null) continue;
+                        moves = tryMoves;
+                        usedFen = anchorFens[a];
+                        anchor = a;
+                        break;
+                    }
+                }
+
+                // (2) Sonst: Alternative zu einem Zug INNERHALB einer vorangegangenen Variante desselben
+                // Blocks („… 3.Nc3 a6" und danach „3...h6", „7...Db6 ist ‚best'"). Die gehört genau dorthin
+                // — gesammelt am Ende der Linie ergibt sie aneinandergereihte Satzfetzen ohne Zusammenhang.
+                if (moves == null && !hasNull && ord.HasValue)
+                {
+                    for (int r = rendered.Count - 1; r >= 0 && moves == null; r--)
+                    {
+                        foreach (var spot in rendered[r].Spots)
                         {
-                            if (!FenHasOrder(anchorFens[a], ord.Value)) continue;
-                            var tryMoves = ResolveLine(anchorFens[a], raws, 0);
+                            if (spot.Order != ord.Value) continue;
+                            var tryMoves = ResolveLine(spot.Fen, raws, 0);
                             if (tryMoves == null) continue;
                             moves = tryMoves;
-                            anchor = a;
+                            usedFen = spot.Fen;
+                            host = rendered[r];
+                            hostSpot = spot.TokenIndex;
                             break;
                         }
                     }
                 }
 
-                var body = new StringBuilder();         // gültige Varianten-Notation
-                var rawText = new StringBuilder();       // Fallback-Klartext (Kommentar)
-                int k = 0;
-
-                foreach (var item in cluster)
+                RenderedCluster? built = moves != null ? BuildCluster(cluster, moves, usedFen!) : null;
+                if (built == null)
                 {
-                    if (item.Key == "C")
-                    {
-                        string c = item.CommentAfter;
-                        if (c != "") { body.Append($"{{{c}}} "); AppendText(rawText, c); }
-                    }
-                    else if (item.Key == "V")
-                    {
-                        // Verschachtelte Variante → als Klartext einbetten (gültig + einfach).
-                        string nested = item.FlattenToText();
-                        if (nested != "") { body.Append($"{{{nested}}} "); AppendText(rawText, nested); }
-                    }
-                    else if (item.Key == "S")
-                    {
-                        string raw = SanTextOf(item);
-                        if (raw == "") continue;
-                        AppendText(rawText, raw);
-                        if (moves != null) body.Append(moves[k] + " ");
-                        k++;
-                    }
+                    string t = PlainTextOf(cluster);
+                    if (t != "") entries.Add((-1, null, $"{{{t}}}"));
+                    continue;
                 }
 
-                if (moves != null)
+                rendered.Add(built);
+                if (host != null) host.AddNested(hostSpot, built);   // wird MIT dem Gastgeber ausgegeben
+                else entries.Add((anchor, built, ""));
+            }
+
+            foreach (var (a, c, t) in entries)
+                result.Add((a, c != null ? c.ToPgn() : t));
+            return result;
+        }
+
+        /// <summary>Eine gebaute Variante: Token des Rumpfes, die Stellungen VOR ihren Zügen (Ankerpunkte für
+        /// Unter-Varianten) und die Unter-Varianten je Zug-Token.</summary>
+        private sealed class RenderedCluster
+        {
+            public List<string> Body { get; } = [];
+            public List<(int Order, string Fen, int TokenIndex)> Spots { get; } = [];
+            private readonly Dictionary<int, List<RenderedCluster>> _nested = [];
+
+            /// <summary>Hängt eine Unter-Variante hinter den Zug <paramref name="moveTokenIndex"/> — und hinter
+            /// die Kommentare, die direkt zu diesem Zug gehören. Sonst stünde die Alternative mitten im Satz
+            /// („… a6 (3...h6 …) and even" statt „… a6 and even (3...h6 …)").</summary>
+            public void AddNested(int moveTokenIndex, RenderedCluster child)
+            {
+                int at = moveTokenIndex;
+                while (at + 1 < Body.Count && Body[at + 1].StartsWith('{')) at++;
+                if (!_nested.TryGetValue(at, out var list)) _nested[at] = list = [];
+                list.Add(child);
+            }
+
+            public string ToPgn()
+            {
+                var sb = new StringBuilder("(");
+                for (int i = 0; i < Body.Count; i++)
                 {
-                    string b = body.ToString().Trim();
-                    if (b != "") result.Add((anchor, $"({b})"));
+                    if (sb.Length > 1) sb.Append(' ');
+                    sb.Append(Body[i]);
+                    if (!_nested.TryGetValue(i, out var kids)) continue;
+                    foreach (var kid in kids) { sb.Append(' '); sb.Append(kid.ToPgn()); }
                 }
-                else
+                return sb.Append(')').ToString();
+            }
+        }
+
+        /// <summary>Baut den Rumpf eines Clusters aus den schon aufgelösten Zügen und merkt sich dabei die
+        /// Stellung vor jedem Zug — daran hängen später die Unter-Varianten.</summary>
+        private static RenderedCluster? BuildCluster(List<JsonMoveItemList> cluster, List<string> moves, string fen)
+        {
+            ChessGame? game = TryNewGame(fen);
+            if (game == null) return null;
+
+            var rc = new RenderedCluster();
+            int k = 0;
+            foreach (var item in cluster)
+            {
+                if (item.Key == "C")
                 {
-                    string t = rawText.ToString().Trim();
-                    if (t != "") result.Add((-1, $"{{{t}}}"));
+                    string c = item.CommentAfter;
+                    if (c != "") rc.Body.Add($"{{{c}}}");
+                }
+                else if (item.Key == "V")
+                {
+                    // Verschachtelte Variante → als Klartext einbetten (gültig + einfach).
+                    string nested = item.FlattenToText();
+                    if (nested != "") rc.Body.Add($"{{{nested}}}");
+                }
+                else if (item.Key == "S")
+                {
+                    if (SanTextOf(item) == "") continue;
+                    if (k >= moves.Count) return null;
+                    string fenBefore = game.GetFen();
+                    rc.Spots.Add((OrderOfFen(fenBefore), fenBefore, rc.Body.Count));
+                    var candidates = Game.SanCandidates(game, StripMoveNumber(moves[k]));
+                    if (candidates.Count == 0) return null;
+                    try { game.MakeMove(candidates[0], false); }
+                    catch { return null; }
+                    rc.Body.Add(moves[k]);
+                    k++;
                 }
             }
-            return result;
+            return rc.Body.Count > 0 ? rc : null;
+        }
+
+        /// <summary>Der ganze Cluster als Klartext — die Notlösung, wenn er nirgends spielbar ist.</summary>
+        private static string PlainTextOf(List<JsonMoveItemList> cluster)
+        {
+            var sb = new StringBuilder();
+            foreach (var item in cluster)
+            {
+                if (item.Key == "C") { string c = item.CommentAfter; if (c != "") AppendText(sb, c); }
+                else if (item.Key == "V") { string n = item.FlattenToText(); if (n != "") AppendText(sb, n); }
+                else if (item.Key == "S") { string raw = SanTextOf(item); if (raw != "") AppendText(sb, raw); }
+            }
+            return sb.ToString().Trim();
+        }
+
+        /// <summary>Zugnummern-Schlüssel einer Stellung (<see cref="MoveOrder"/>: weiß = N·2, schwarz = N·2+1).</summary>
+        private static int OrderOfFen(string fen)
+        {
+            var parts = (fen ?? "").Split(' ');
+            if (parts.Length < 6 || !int.TryParse(parts[5], out int fullmove)) return -1;
+            return fullmove * 2 + (parts[1] == "b" ? 1 : 0);
         }
 
         /// <summary>Passt die Stellung zur Zugnummer eines Tokens (<see cref="MoveOrder"/>: weiß = N·2,
