@@ -681,7 +681,14 @@ namespace piratechess_lib
                 int anchor = -1;
                 RenderedCluster? host = null;
                 int hostSpot = -1;
-                List<string>? moves = raws.Count > 0 && !hasNull ? ResolveLine(branchFen, raws, 0) : null;
+
+                // Trägt der erste Zug eine Zugnummer, muss die Elternstellung zu ihr passen — sonst gilt der
+                // Cluster hier als nicht spielbar. Grund: eine Verweis-Notiz („4...Sc6 5.Sc3 …") ist von der
+                // Elternstellung aus ZUFÄLLIG legal (nach 1.e4 ist Sb8-c6 ein gültiger Zug) und wurde als
+                // Variante ausgegeben, die etwas ganz anderes zeigt als der Satz meint; gemeldet 2026-10-09,
+                // sie stand am Ende des Kapitels statt bei ihrem Zug. Ohne Nummer bleibt es beim Elternanker.
+                bool parentFits = !ord.HasValue || FenHasOrder(branchFen, ord.Value);
+                List<string>? moves = raws.Count > 0 && !hasNull && parentFits ? ResolveLine(branchFen, raws, 0) : null;
 
                 // (1) Nicht von hier spielbar? Dann die Stellung der HAUPTLINIE suchen, zu der die
                 // ZUGNUMMER des ersten Zuges passt (Vollzugzahl + Farbe müssen stimmen — ohne diese
@@ -747,13 +754,19 @@ namespace piratechess_lib
             public List<(int Order, string Fen, int TokenIndex)> Spots { get; } = [];
             private readonly Dictionary<int, List<RenderedCluster>> _nested = [];
 
-            /// <summary>Hängt eine Unter-Variante hinter den Zug <paramref name="moveTokenIndex"/> — und hinter
-            /// die Kommentare, die direkt zu diesem Zug gehören. Sonst stünde die Alternative mitten im Satz
-            /// („… a6 (3...h6 …) and even" statt „… a6 and even (3...h6 …)").</summary>
+            /// <summary>
+            /// Hängt eine Unter-Variante hinter den Zug <paramref name="moveTokenIndex"/>. Folgt danach noch
+            /// ein ZUG, kommt sie direkt hinter den Zug: der Kommentar dazwischen leitet dann den nächsten
+            /// Zug ein („… a6 {we meet the Kan with} 5.c4"), und die Variante dort hinein zu schieben
+            /// zerschneidet den Satz. Ist der Zug dagegen der LETZTE der Variante, gehört der Kommentar zur
+            /// Alternative selbst („… a6 {and even} (3...h6 …)") und die Variante kommt dahinter.
+            /// </summary>
             public void AddNested(int moveTokenIndex, RenderedCluster child)
             {
                 int at = moveTokenIndex;
-                while (at + 1 < Body.Count && Body[at + 1].StartsWith('{')) at++;
+                bool moreMoves = Spots.Any(sp => sp.TokenIndex > moveTokenIndex);
+                if (!moreMoves)
+                    while (at + 1 < Body.Count && Body[at + 1].StartsWith('{')) at++;
                 if (!_nested.TryGetValue(at, out var list)) _nested[at] = list = [];
                 list.Add(child);
             }

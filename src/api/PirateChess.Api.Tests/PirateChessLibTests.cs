@@ -714,6 +714,60 @@ public class PirateChessLibTests
         Assert.DoesNotContain("%info", pgn);
     }
 
+    // ---- Ergebnis-Marker + Zugnummer am Anker (gemeldet 2026-10-09) --------
+    // Der Movetext MUSS mit dem Ergebnis enden. Ohne ihn melden strenge Leser eine unvollständige
+    // Partie, und ChessBase zeigt die letzte Variante dort an, wo das Ergebnis stehen müsste.
+    [Fact]
+    public void GetCourse_Movetext_EndsWithResultMarker()
+    {
+        var course = OneChapterCourse(
+            "{\"list\":{\"name\":\"K\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L\"}]}}",
+            "{\"game\":{\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"e4\"}]}}");
+        var lib = new PirateChessLib { restResponseCourse = course };
+
+        var (pgn, _) = lib.GetCourse("1", useLocalData: true);
+
+        Assert.Contains("1. e4 *", pgn);
+        Assert.Equal(1, CountOf(pgn, "1. e4 *"));    // genau EIN Marker, am Ende des Movetexts
+    }
+
+    // Eine Verweis-Notiz mit Zugnummer („4...Sc6 5.Sc3 …") ist von der Elternstellung aus ZUFÄLLIG legal
+    // — nach 1.e4 ist Sb8-c6 ein gültiger Zug. Sie wurde deshalb als Variante dorthin geschrieben und
+    // stand am Ende des Kapitels statt bei ihrem Zug. Jetzt muss die Zugnummer zur Stellung passen.
+    [Fact]
+    public void GetVariationParts_NestedAlternative_SitsBeforeTheTextLeadingToTheNextMove()
+    {
+        // Folgt dem Zug noch ein weiterer, leitet der Kommentar dazwischen den NÄCHSTEN Zug ein
+        // („… a6 {we meet the Kan with} 5.c4"). Die Alternative gehört davor, sonst zerschneidet sie
+        // den Satz. Steht der Zug am Ende, gehört der Kommentar zur Alternative (anderer Test).
+        var pgn = PgnForFirstMoveWithV(AfterWithV(StartFen,
+            ("S", "1.d4"), ("S", "d5"), ("C", "wir spielen"), ("S", "2.c4"), ("C", "und dann"),
+            ("S", "2...e6"), ("C", "Alternative:"), ("S", "2...c6"), ("C", "Slawisch.")));
+
+        Assert.Contains("(1.d4 d5 {wir spielen} 2.c4 {und dann} 2...e6 {Alternative:} (2...c6 {Slawisch.}))", pgn);
+    }
+
+    [Fact]
+    public void GetVariationParts_NumberedNoteAccidentallyLegalAtParent_StaysText()
+    {
+        const string afterE4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data =
+            [
+                new JsonMove { Id = 0, Move = 1, Col = "w", San = "e4" },
+                new JsonMove { Id = 1, Move = 1, Col = "b", San = "--",
+                    After = AfterWithItems(afterE4, VariationItem(("S", "4...Nc6"), ("C", "will be met with"), ("S", "5.Nc3"))) },
+            ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.DoesNotContain("(4...Nc6", pgn);
+        Assert.Contains("{4...Nc6 will be met with 5.Nc3}", pgn);
+    }
+
     // ---- PGN-Escaping: Sonderzeichen aus Chessable-Texten ------------------
     // Kapitel-/Linienname mit " zerlegte den Tag-Wert (`[Event "The "Catalan" Setup"]`) → ungültiger
     // Header, den der rookhub-Import falsch bzw. gar nicht liest.

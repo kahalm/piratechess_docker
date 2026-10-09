@@ -358,6 +358,10 @@ namespace piratechess_lib
                                || lineColor.Equals("black", StringComparison.OrdinalIgnoreCase)
                     ? $"[ChessableColor \"{lineColor.ToLowerInvariant()}\"]\n                        " : "";
 
+                // Der Movetext endet mit dem ERGEBNIS-Marker. PGN verlangt ihn (hier immer „*" — eine
+                // Chessable-Linie ist keine beendete Partie); ohne ihn melden strenge Leser eine
+                // unvollständige Partie, und ChessBase zeigt die letzte Variante an der Stelle, wo das
+                // Ergebnis stehen müsste (vom Nutzer gemeldet 2026-10-09).
                 _ = (_pgn?.Append($"""
 
                         [Event "{EscapeHeader(pgnHeader.Event)}"]
@@ -367,7 +371,7 @@ namespace piratechess_lib
                         [FEN "{EscapeHeader(pgnHeader.FEN)}"]
                         [Result "*"]
                         {oidTag}{colorTag}
-                        {pgn}
+                        {pgn}*
 
 
                         """));
