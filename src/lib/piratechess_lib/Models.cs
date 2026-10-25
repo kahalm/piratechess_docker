@@ -32,7 +32,7 @@ namespace piratechess_lib
         private static List<string> MainlineFens(SortedList<int, JsonMove> moves, Dictionary<int, ResponseMove> afterByMoveId, string? initial)
         {
             var fens = new List<string>(moves.Count);
-            ChessGame? game = TryNewGame(string.IsNullOrWhiteSpace(initial) ? StartFen : initial);
+            ChessGame? game = SanResolver.TryNewGame(string.IsNullOrWhiteSpace(initial) ? StartFen : initial);
             for (int i = 0; i < moves.Count; i++)
             {
                 string fromJson = afterByMoveId.TryGetValue(moves.Keys[i], out var r) ? (r.Before ?? "") : "";
@@ -41,7 +41,7 @@ namespace piratechess_lib
                 var move = moves.Values[i];
                 if (game == null) continue;
                 if (IsNullSan(move.San)) { game = null; continue; }   // ab hier ist die Stellung nicht mehr sicher
-                var candidates = SanCandidates(game, (move.San ?? "").Trim());
+                var candidates = SanResolver.SanCandidates(game, (move.San ?? "").Trim());
                 if (candidates.Count != 1) { game = null; continue; }
                 try { game.MakeMove(candidates[0], false); }
                 catch { game = null; }
@@ -51,13 +51,6 @@ namespace piratechess_lib
 
         /// <summary>Ausgangsstellung einer Partie — Rückfall, wenn die Linie keine eigene FEN nennt.</summary>
         private const string StartFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-
-        /// <summary>Brett aus einer FEN, ohne zu werfen (Chessable liefert auch Muster-Diagramme ohne König).</summary>
-        private static ChessGame? TryNewGame(string? fen)
-        {
-            try { return string.IsNullOrWhiteSpace(fen) ? new ChessGame() : new ChessGame(fen); }
-            catch { return null; }
-        }
 
         /// <summary>Chessables Platzhalter für „kein Zug" (Einleitungs-/Erklärlinien) — auch ein leeres San.</summary>
         private static bool IsNullSan(string? san) => (san ?? "").Trim() is "" or "--";
@@ -338,18 +331,10 @@ namespace piratechess_lib
 
                 foreach (var m in sortedMoves.Values)
                 {
-                    var move = SanToMove(game, m.San);
+                    var move = SanResolver.SanToMove(game, m.San);
                     if (move == null) { result.Add(null); break; }
 
-                    char ff = char.ToLower(move.OriginalPosition.File.ToString()[0]);
-                    int fr = move.OriginalPosition.Rank;
-                    char tf = char.ToLower(move.NewPosition.File.ToString()[0]);
-                    int tr = move.NewPosition.Rank;
-                    string uciStr = $"{ff}{fr}{tf}{tr}";
-                    int eqIdx = m.San.IndexOf('=');
-                    if (eqIdx >= 0 && eqIdx + 1 < m.San.Length)
-                        uciStr += char.ToLower(m.San[eqIdx + 1]);
-                    result.Add(uciStr);
+                    result.Add(SanResolver.ToUci(move, m.San));
 
                     game.MakeMove(move, false);
                 }
@@ -381,22 +366,14 @@ namespace piratechess_lib
                         bool isWhiteTurn = game.WhoseTurn == Player.White;
                         if (solverIsWhite == null || solverIsWhite.Value == isWhiteTurn)
                         {
-                            var move = SanToMove(game, allMoves[i].San);
+                            var move = SanResolver.SanToMove(game, allMoves[i].San);
                             if (move == null) return null;
-                            char ff = char.ToLower(move.OriginalPosition.File.ToString()[0]);
-                            int fr = move.OriginalPosition.Rank;
-                            char tf = char.ToLower(move.NewPosition.File.ToString()[0]);
-                            int tr = move.NewPosition.Rank;
-                            string uciStr = $"{ff}{fr}{tf}{tr}";
-                            int eqIdx = allMoves[i].San.IndexOf('=');
-                            if (eqIdx >= 0 && eqIdx + 1 < allMoves[i].San.Length)
-                                uciStr += char.ToLower(allMoves[i].San[eqIdx + 1]);
-                            return uciStr;
+                            return SanResolver.ToUci(move, allMoves[i].San);
                         }
                     }
 
                     // Advance the game position for all moves before the target
-                    var applyMove = SanToMove(game, allMoves[i].San);
+                    var applyMove = SanResolver.SanToMove(game, allMoves[i].San);
                     if (applyMove == null) return null;
                     game.MakeMove(applyMove, false);
                 }
@@ -404,101 +381,6 @@ namespace piratechess_lib
             catch { }
             return null;
         }
-
-        internal static Move? SanToMove(ChessGame game, string san)
-        {
-            var candidates = SanCandidates(game, san);
-            return candidates.Count > 0 ? candidates[0] : null;
-        }
-
-        /// <summary>
-        /// ALLE legalen Züge, die <paramref name="san"/> in dieser Stellung meinen kann. Mehr als einer heißt:
-        /// die Notation ist mehrdeutig („Ne4", wenn zwei Springer nach e4 können) — <see cref="SanToMove"/>
-        /// nimmt dann still den ersten, und das ist für die Hauptlinie so geblieben (Chessable erzeugt deren
-        /// SAN selbst). In Autoren-Varianten steht dagegen, was der Autor tippt (gemeldet 2026-09-23).
-        /// Bauernzüge und Rochaden liefern höchstens einen.
-        /// </summary>
-        internal static List<Move> SanCandidates(ChessGame game, string san)
-        {
-            string s = (san ?? string.Empty).TrimEnd('+', '#', '!', '?');
-            int backRank = game.WhoseTurn == Player.White ? 1 : 8;
-
-            if (s is "O-O" or "0-0")
-                return [new Move(new Position(ChessDotNet.File.E, backRank), new Position(ChessDotNet.File.G, backRank), game.WhoseTurn)];
-            if (s is "O-O-O" or "0-0-0")
-                return [new Move(new Position(ChessDotNet.File.E, backRank), new Position(ChessDotNet.File.C, backRank), game.WhoseTurn)];
-
-            char? promo = null;
-            int eqIdx = s.IndexOf('=');
-            if (eqIdx >= 0) { promo = eqIdx + 1 < s.Length ? s[eqIdx + 1] : (char?)null; s = s[..eqIdx]; }
-
-            // Unzureichende/leere Notation (z. B. nach StripMoveNumber bleibt nur eine Zugnummer übrig):
-            // kein gültiger Zug → null statt s[^2]-IndexOutOfRange, das sonst den ganzen Kurs-Abruf abriss.
-            if (s.Length < 2) return [];
-
-            var destFile = (ChessDotNet.File)(char.ToLower(s[^2]) - 'a');
-            int destRank = s[^1] - '0';
-            var validMoves = game.GetValidMoves(game.WhoseTurn);
-
-            bool isPawn = !char.IsUpper(s[0]);
-            if (isPawn)
-            {
-                char? srcFile = s.Length >= 4 ? s[0] : (char?)null;
-                foreach (var vm in validMoves)
-                {
-                    if (vm.NewPosition.File != destFile || vm.NewPosition.Rank != destRank) continue;
-                    if (game.GetPieceAt(vm.OriginalPosition) is not Pawn) continue;
-                    if (srcFile.HasValue && char.ToLower(vm.OriginalPosition.File.ToString()[0]) != srcFile.Value) continue;
-                    return [promo.HasValue
-                        ? new Move(vm.OriginalPosition, vm.NewPosition, game.WhoseTurn, promo.Value)
-                        : vm];
-                }
-                // ChessDotNet 1.0.0 listet GERADE Bauern-Push-Umwandlungen (z. B. "e8=Q") nicht in
-                // GetValidMoves (Schlag-Umwandlungen schon) → der gefilterte Zug zur Zielfeld-Reihe wird
-                // nicht gefunden und der ganze (Schlüssel-)Zug bliebe ohne UCI. Für die Push-Umwandlung
-                // den Zug daher direkt konstruieren: Ursprung = dieselbe Datei, eine Reihe hinter dem Ziel.
-                // WICHTIG: die Umwandlungsreihe muss zur ziehenden Seite passen (Weiß→8, Schwarz→1). Eine
-                // farbblinde Prüfung (destRank is 1 or 8) errechnete bei Weiß+Reihe 1 / Schwarz+Reihe 8
-                // eine originRank von 0 bzw. 9 → new Position(...,0/9) → GetPieceAt wirft
-                // IndexOutOfRangeException und riss den ganzen Kurs-Abruf ab (kaputte Varianten-Daten).
-                bool promRank = game.WhoseTurn == Player.White ? destRank == 8 : destRank == 1;
-                if (promo.HasValue && !srcFile.HasValue && promRank)
-                {
-                    int originRank = game.WhoseTurn == Player.White ? destRank - 1 : destRank + 1;
-                    var origin = new Position(destFile, originRank);
-                    if (game.GetPieceAt(origin) is Pawn)
-                        return [new Move(origin, new Position(destFile, destRank), game.WhoseTurn, promo.Value)];
-                }
-                return [];
-            }
-
-            char pieceChar = s[0];
-            string mid = s.Length > 3 ? s[1..^2].Replace("x", "") : "";
-            char? disambigFile = mid.Length > 0 && char.IsLetter(mid[0]) ? mid[0] : (char?)null;
-            int? disambigRank = mid.Length > 0 && char.IsDigit(mid[^1]) ? mid[^1] - '0' : (int?)null;
-
-            var found = new List<Move>();
-            foreach (var vm in validMoves)
-            {
-                if (vm.NewPosition.File != destFile || vm.NewPosition.Rank != destRank) continue;
-                var piece = game.GetPieceAt(vm.OriginalPosition);
-                if (piece == null || SanPieceChar(piece) != pieceChar) continue;
-                if (disambigFile.HasValue && char.ToLower(vm.OriginalPosition.File.ToString()[0]) != disambigFile.Value) continue;
-                if (disambigRank.HasValue && vm.OriginalPosition.Rank != disambigRank.Value) continue;
-                found.Add(vm);
-            }
-            return found;
-        }
-
-        private static char SanPieceChar(Piece piece) => piece switch
-        {
-            King => 'K',
-            Queen => 'Q',
-            Rook => 'R',
-            Bishop => 'B',
-            Knight => 'N',
-            _ => 'P'
-        };
     }
 
     public partial class JsonMoveItemList
@@ -789,7 +671,7 @@ namespace piratechess_lib
         /// Stellung vor jedem Zug — daran hängen später die Unter-Varianten.</summary>
         private static RenderedCluster? BuildCluster(List<JsonMoveItemList> cluster, List<string> moves, string fen)
         {
-            ChessGame? game = TryNewGame(fen);
+            ChessGame? game = SanResolver.TryNewGame(fen);
             if (game == null) return null;
 
             var rc = new RenderedCluster();
@@ -813,7 +695,7 @@ namespace piratechess_lib
                     if (k >= moves.Count) return null;
                     string fenBefore = game.GetFen();
                     rc.Spots.Add((OrderOfFen(fenBefore), fenBefore, rc.Body.Count));
-                    var candidates = Game.SanCandidates(game, StripMoveNumber(moves[k]));
+                    var candidates = SanResolver.SanCandidates(game, StripMoveNumber(moves[k]));
                     if (candidates.Count == 0) return null;
                     try { game.MakeMove(candidates[0], false); }
                     catch { return null; }
@@ -874,7 +756,7 @@ namespace piratechess_lib
         ///
         /// <para>Autoren schreiben in ihren Seitenlinien auch mehrdeutige Züge („16.Ne4", wenn Springer auf c3 UND
         /// c5 nach e4 können; gemeldet 2026-09-23 an „Lifetime Repertoires: King's Indian Defense - Part 2").
-        /// <see cref="Game.SanToMove"/> nahm dann still den ersten Springer, und ins PGN kam ein Zug, den kein
+        /// <see cref="SanResolver.SanToMove"/> nahm dann still den ersten Springer, und ins PGN kam ein Zug, den kein
         /// PGN-Leser spielen kann. Jetzt wird jede passende Lesart durchgespielt: trägt genau EINE die ganze Folge
         /// (nur nach 16.S3e4 geht 17.Sxb7), wird sie genommen und eindeutig geschrieben („16.N3e4"); tragen
         /// mehrere oder keine, wird der Cluster Kommentar — geraten wird nicht.</para>
@@ -888,7 +770,7 @@ namespace piratechess_lib
         {
             if (raws.Count > MaxVariationPlies) return null;
             if (i >= raws.Count) return [];
-            ChessGame? game = TryNewGame(fen);
+            ChessGame? game = SanResolver.TryNewGame(fen);
             if (game == null) return null;
 
             string raw = raws[i];
@@ -896,12 +778,12 @@ namespace piratechess_lib
             // beginnt „;" aber einen Zeilenkommentar. Alles andere bleibt als Kommentar erhalten (S2-017).
             string san = StripMoveNumber(raw);
             if (!PgnTokenGuard.IsSan(san)) return null;
-            var candidates = Game.SanCandidates(game, san);
+            var candidates = SanResolver.SanCandidates(game, san);
             List<string>? rest = null;
             Move? chosen = null;
             foreach (var candidate in candidates)
             {
-                ChessGame? next = TryNewGame(game.GetFen());
+                ChessGame? next = SanResolver.TryNewGame(game.GetFen());
                 if (next == null) continue;
                 try { next.MakeMove(candidate, false); }
                 catch { continue; }
@@ -958,12 +840,6 @@ namespace piratechess_lib
                 else if (it.Key == "V") { string n = it.FlattenToText(); if (n != "") AppendText(sb, n); }
             }
             return sb.ToString().Trim();
-        }
-
-        private static ChessGame? TryNewGame(string? fen)
-        {
-            try { return string.IsNullOrWhiteSpace(fen) ? new ChessGame() : new ChessGame(fen); }
-            catch { return null; }
         }
 
         /// <summary>Sortierschlüssel eines „N." / „N..."-Zugtokens (weiß = N·2, schwarz = N·2+1); null bei bloßer SAN.</summary>
