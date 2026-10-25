@@ -314,7 +314,7 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         Assert.Equal("fresh.login.jwt", jwt);
         const string url = "https://www.chessable.com/api/v1/authenticate";
         var recorded = Assert.Single(Recorded());
-        Assert.Equal(["--proxy", proxy, .. ChessableHttpService.BuildPostArgs(url)], recorded.Argv);
+        Assert.Equal(["--proxy", proxy, .. ChessableCurlArgs.BuildPostArgs(url)], recorded.Argv);
         var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA512.HashData("pw"u8));
         Assert.Equal("{\"method\":\"email\",\"credentials\":{\"email\":\"a@b.c\",\"password\":\"" + hash
             + "\"},\"providerData\":null,\"mode\":\"login\",\"checkoutData\":null,\"preferredLanguage\":\"en\","

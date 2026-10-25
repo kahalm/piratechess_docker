@@ -63,7 +63,7 @@ public static class ChessableContent
     }
 
     private static string? ErrorReason(string content)
-        => ChessableHttpService.TryGetChessableErrorMessage(content) is { } message ? Trim(message) : null;
+        => ChessableResponseClassifier.TryGetChessableErrorMessage(content) is { } message ? Trim(message) : null;
 
     private static string Trim(string s) => s.Length <= ReasonMaxLength ? s : s[..ReasonMaxLength];
 }

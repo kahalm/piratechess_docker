@@ -15,7 +15,7 @@ public class ChessableHttpServiceTests
     [InlineData("  ")]   // 2 Zeichen
     public void IsSoftBlockedBody_EmptyOrBrace_ReturnsTrue(string? body)
     {
-        Assert.True(ChessableHttpService.IsSoftBlockedBody(body));
+        Assert.True(ChessableResponseClassifier.IsSoftBlockedBody(body));
     }
 
     [Theory]
@@ -24,7 +24,7 @@ public class ChessableHttpServiceTests
     [InlineData("<html>")]   // HTML ist KEIN Soft-Block (eigene Klassifikation)
     public void IsSoftBlockedBody_RealPayload_ReturnsFalse(string body)
     {
-        Assert.False(ChessableHttpService.IsSoftBlockedBody(body));
+        Assert.False(ChessableResponseClassifier.IsSoftBlockedBody(body));
     }
 
     // --- Transienter Proxy-Ausfall (Fix: gluetun :8888 liefert beim VPN-Reconnect 503) ---
@@ -34,7 +34,7 @@ public class ChessableHttpServiceTests
     {
         // Exakt der beobachtete curl-Fehler aus der ChessableRawResponses-Tabelle
         const string stderr = "curl: (56) CONNECT tunnel failed, response 503";
-        Assert.True(ChessableHttpService.IsTransientProxyFailure(56, stderr));
+        Assert.True(ChessableResponseClassifier.IsTransientProxyFailure(56, stderr));
     }
 
     [Theory]
@@ -43,7 +43,7 @@ public class ChessableHttpServiceTests
     [InlineData("CONNECT TUNNEL FAILED, RESPONSE 503")] // Case-insensitiv
     public void IsTransientProxyFailure_Tunnel503Variants_ReturnsTrue(string stderr)
     {
-        Assert.True(ChessableHttpService.IsTransientProxyFailure(56, stderr));
+        Assert.True(ChessableResponseClassifier.IsTransientProxyFailure(56, stderr));
     }
 
     [Theory]
@@ -51,7 +51,7 @@ public class ChessableHttpServiceTests
     [InlineData("")]
     public void IsTransientProxyFailure_NoError_ReturnsFalse(string? stderr)
     {
-        Assert.False(ChessableHttpService.IsTransientProxyFailure(0, stderr));
+        Assert.False(ChessableResponseClassifier.IsTransientProxyFailure(0, stderr));
     }
 
     [Theory]
@@ -60,7 +60,7 @@ public class ChessableHttpServiceTests
     [InlineData(0, "Received HTTP code 403 from proxy after CONNECT")] // echtes 403 ≠ transient
     public void IsTransientProxyFailure_NonTunnelError_ReturnsFalse(int exitCode, string stderr)
     {
-        Assert.False(ChessableHttpService.IsTransientProxyFailure(exitCode, stderr));
+        Assert.False(ChessableResponseClassifier.IsTransientProxyFailure(exitCode, stderr));
     }
 
     // --- Chessable-Fehler-Body trotz HTTP 200 (Fix: abgelaufener Bearer → „keine Kurse") ---
@@ -70,7 +70,7 @@ public class ChessableHttpServiceTests
     {
         // Exakt der beobachtete Body aus ChessableRawResponses bei abgelaufenem Bearer.
         const string body = "{\"error\":{\"message\":\"Expired token\"}}";
-        var msg = ChessableHttpService.TryGetChessableErrorMessage(body);
+        var msg = ChessableResponseClassifier.TryGetChessableErrorMessage(body);
         Assert.NotNull(msg);
         Assert.Contains("Expired token", msg);
         Assert.Contains("neu hinterlegen", msg); // Hinweis auf neuen Bearer
@@ -81,7 +81,7 @@ public class ChessableHttpServiceTests
     [InlineData("{\"error\":{\"message\":\"Invalid request\"}}")]   // error.message ohne „token"
     public void TryGetChessableErrorMessage_GenericError_ReturnsMessage(string body)
     {
-        var msg = ChessableHttpService.TryGetChessableErrorMessage(body);
+        var msg = ChessableResponseClassifier.TryGetChessableErrorMessage(body);
         Assert.NotNull(msg);
         Assert.StartsWith("Chessable:", msg);
     }
@@ -92,7 +92,7 @@ public class ChessableHttpServiceTests
         // Beobachteter getCourse-Body für nicht besessene Kurse: message ist LEER, die echte
         // Meldung steht in userFriendlyErrorMessage. Früher rutschte das als „Course has no chapters" durch.
         const string body = "{\"error\":{\"userFriendlyErrorMessage\":\"You do not own this course.\",\"message\":\"\",\"code\":\"BOOK_NOT_OWNED\"},\"hash\":\"124\"}";
-        var msg = ChessableHttpService.TryGetChessableErrorMessage(body);
+        var msg = ChessableResponseClassifier.TryGetChessableErrorMessage(body);
         Assert.NotNull(msg);
         Assert.Contains("You do not own this course", msg);
     }
@@ -103,7 +103,7 @@ public class ChessableHttpServiceTests
     [InlineData("not json")]
     public void TryGetChessableErrorMessage_NoError_ReturnsNull(string body)
     {
-        Assert.Null(ChessableHttpService.TryGetChessableErrorMessage(body));
+        Assert.Null(ChessableResponseClassifier.TryGetChessableErrorMessage(body));
     }
 
     // --- HTML-statt-JSON-Antwort (Fix: „'<' is an invalid start of a value" leakte in die UI) ---
@@ -114,7 +114,7 @@ public class ChessableHttpServiceTests
     [InlineData("<?xml version=\"1.0\"?><error/>")]
     public void LooksLikeHtml_HtmlBody_ReturnsTrue(string body)
     {
-        Assert.True(ChessableHttpService.LooksLikeHtml(body));
+        Assert.True(ChessableResponseClassifier.LooksLikeHtml(body));
     }
 
     [Theory]
@@ -124,7 +124,7 @@ public class ChessableHttpServiceTests
     [InlineData("   ")]
     public void LooksLikeHtml_NonHtmlBody_ReturnsFalse(string body)
     {
-        Assert.False(ChessableHttpService.LooksLikeHtml(body));
+        Assert.False(ChessableResponseClassifier.LooksLikeHtml(body));
     }
 
     // --- Unterscheidung „Token abgelaufen" vs. „IP/Zugriff blockiert" (Cloudflare 403) ---
@@ -147,7 +147,7 @@ public class ChessableHttpServiceTests
     public void ClassifyBlockedResponse_ExpiredBearer_SaysTokenExpired()
     {
         var expired = Jwt(DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds());
-        var msg = ChessableHttpService.ClassifyBlockedResponse(CloudflareBlock, expired);
+        var msg = ChessableResponseClassifier.ClassifyBlockedResponse(CloudflareBlock, expired);
         Assert.Contains("abgelaufen", msg);
         Assert.Contains("neu hinterlegen", msg);
         Assert.DoesNotContain("VPN", msg); // klar Token, nicht IP
@@ -157,7 +157,7 @@ public class ChessableHttpServiceTests
     public void ClassifyBlockedResponse_ValidBearer_CloudflareBlock_PointsToVpnIp()
     {
         var valid = Jwt(DateTimeOffset.UtcNow.AddDays(1).ToUnixTimeSeconds());
-        var msg = ChessableHttpService.ClassifyBlockedResponse(CloudflareBlock, valid);
+        var msg = ChessableResponseClassifier.ClassifyBlockedResponse(CloudflareBlock, valid);
         Assert.Contains("blockiert", msg);
         Assert.Contains("VPN", msg);          // verweist auf die IP, nicht den Token
         Assert.Contains("403", msg);
@@ -167,7 +167,7 @@ public class ChessableHttpServiceTests
     public void ClassifyBlockedResponse_ValidBearer_GenericHtml_StaysAmbiguousButClean()
     {
         var valid = Jwt(DateTimeOffset.UtcNow.AddDays(1).ToUnixTimeSeconds());
-        var msg = ChessableHttpService.ClassifyBlockedResponse("<html><body>nope</body></html>", valid);
+        var msg = ChessableResponseClassifier.ClassifyBlockedResponse("<html><body>nope</body></html>", valid);
         Assert.Contains("kein gültiges JSON", msg);
         Assert.DoesNotContain("'<'", msg);    // nie der rohe Parser-Text
     }
@@ -179,7 +179,7 @@ public class ChessableHttpServiceTests
     [InlineData("{\"homeData\":{}}", false)]
     public void IsCloudflareBlockPage_DetectsBlockMarkers(string body, bool expected)
     {
-        Assert.Equal(expected, ChessableHttpService.IsCloudflareBlockPage(body));
+        Assert.Equal(expected, ChessableResponseClassifier.IsCloudflareBlockPage(body));
     }
 
     // --- curl-Arg-Injektion (Fix HIGH: bid/url floss vorher als "{url}" in einen Args-String) ---
@@ -190,7 +190,7 @@ public class ChessableHttpServiceTests
         // Eine bid mit  " -o /tmp/pwn --config /etc/passwd  hätte vorher curl-Flags eingeschleust
         // (Datei schreiben/lesen). Als ArgumentList-Token ist die KOMPLETTE URL genau ein Argument.
         var evil = "https://www.chessable.com/api/v1/getCourse?uid=1&bid=1\" -o /tmp/pwn --config /etc/passwd";
-        var args = ChessableHttpService.BuildGetArgs(evil);
+        var args = ChessableCurlArgs.BuildGetArgs(evil);
 
         Assert.Equal(evil, args[^1]);                       // ganze bösartige URL = genau ein, letztes Token
         Assert.Single(args, a => a == evil);
@@ -204,7 +204,7 @@ public class ChessableHttpServiceTests
     [Fact]
     public void BuildGetArgs_ContainsNoBearer_AuthorizationHeaderComesFromStdin()
     {
-        var args = ChessableHttpService.BuildGetArgs("https://x/y");
+        var args = ChessableCurlArgs.BuildGetArgs("https://x/y");
         Assert.Equal("-s", args[0]);
         Assert.DoesNotContain(args, a => a.Contains("Bearer", StringComparison.OrdinalIgnoreCase)
                                          || a.Contains("authorization", StringComparison.OrdinalIgnoreCase));
@@ -212,7 +212,7 @@ public class ChessableHttpServiceTests
         Assert.True(i > 0, "-H @- fehlt");
         Assert.Equal("-H", args[i - 1]);                              // Header-Datei = stdin
         Assert.Equal("https://x/y", args[^1]);                       // URL zuletzt, ein Token
-        Assert.Equal("authorization: Bearer my.jwt.token\n", ChessableHttpService.BuildGetHeaderStdin("my.jwt.token"));
+        Assert.Equal("authorization: Bearer my.jwt.token\n", ChessableCurlArgs.BuildGetHeaderStdin("my.jwt.token"));
     }
 
     // Golden-Test: Reihenfolge der curl-Argumente (TLS-/Header-Fingerprint). „-H @-" steht exakt dort, wo
@@ -221,7 +221,7 @@ public class ChessableHttpServiceTests
     [Fact]
     public void BuildGetArgs_GoldenOrder()
         => Assert.Equal(GoldenGetArgv("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2", "17"),
-            ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2", 17));
+            ChessableCurlArgs.BuildGetArgs("https://www.chessable.com/api/v1/getGame?lng=en&uid=1&oid=2", 17));
 
     /// <summary>Erwartete GET-Argumentliste als Literal (unabhängig vom Produktionscode); auch der Golden-Test des
     /// kompletten Kursabrufs (ChessableHttpServiceFetchTests) vergleicht gegen sie.</summary>
@@ -257,7 +257,7 @@ public class ChessableHttpServiceTests
     [Fact]
     public void BuildGetHeaderStdin_StripsLineBreaks_SingleHeaderLine()
     {
-        var text = ChessableHttpService.BuildGetHeaderStdin("a.b.c\r\nx-injected: 1\n");
+        var text = ChessableCurlArgs.BuildGetHeaderStdin("a.b.c\r\nx-injected: 1\n");
         Assert.Equal("authorization: Bearer a.b.cx-injected: 1\n", text);
         Assert.Single(text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
     }
@@ -265,7 +265,7 @@ public class ChessableHttpServiceTests
     [Fact]
     public void BuildPostArgs_PostWithStdinBody_AndUrlLast()
     {
-        var args = ChessableHttpService.BuildPostArgs("https://www.chessable.com/api/v1/authenticate");
+        var args = ChessableCurlArgs.BuildPostArgs("https://www.chessable.com/api/v1/authenticate");
         Assert.Contains("-X", args);
         Assert.Contains("POST", args);
         Assert.Contains("-d", args);
@@ -275,7 +275,7 @@ public class ChessableHttpServiceTests
     [Fact]
     public void BuildGetArgs_SetsConnectTimeout30()
     {
-        var args = ChessableHttpService.BuildGetArgs("https://www.chessable.com/api/v1/getGame?oid=1");
+        var args = ChessableCurlArgs.BuildGetArgs("https://www.chessable.com/api/v1/getGame?oid=1");
         var i = args.IndexOf("--connect-timeout");
         Assert.True(i >= 0, "--connect-timeout fehlt");
         Assert.Equal("30", args[i + 1]);
@@ -284,7 +284,7 @@ public class ChessableHttpServiceTests
     [Fact]
     public void BuildPostArgs_SetsConnectTimeout30()
     {
-        var args = ChessableHttpService.BuildPostArgs("https://www.chessable.com/api/v1/authenticate");
+        var args = ChessableCurlArgs.BuildPostArgs("https://www.chessable.com/api/v1/authenticate");
         var i = args.IndexOf("--connect-timeout");
         Assert.True(i >= 0, "--connect-timeout fehlt");
         Assert.Equal("30", args[i + 1]);

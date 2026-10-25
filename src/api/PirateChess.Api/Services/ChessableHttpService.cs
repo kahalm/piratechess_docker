@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using Serilog.Context;
 using piratechess_lib;
+using static PirateChess.Api.Services.ChessableCurlArgs;
+using static PirateChess.Api.Services.ChessableResponseClassifier;
 
 namespace PirateChess.Api.Services;
 
@@ -24,11 +26,6 @@ public class ChessableHttpService : IChessableHttpService
     // bis der Tunnel wieder steht.
     private const int CourseFetchAttempts = 4;
     internal int ProxyRetryDelayMs { get; init; } = 4000;   // Tests setzen ihn auf 0
-
-    // curl bricht die (Proxy-)CONNECT-Phase nach so vielen Sekunden ab, statt im Default bis ~300 s
-    // zu hängen. Bei soft-geblockter/hängender VPN-IP fror ein Request sonst den Import minutenlang
-    // ein; jetzt schlägt er nach 30 s fehl → der Line-Retry (30 s Backoff) greift schnell.
-    private const int CurlConnectTimeoutSec = 30;
 
     // GESAMT-Timeout je Request (--max-time). Eine hängende IP lieferte den Body sonst erst nach
     // 75–120 s (curl 56), was die serielle Pipeline blockierte. Jetzt bricht der Request nach ~20 s
@@ -62,22 +59,6 @@ public class ChessableHttpService : IChessableHttpService
     // Chessable:BlockRetryDelayMs.
     private readonly int _blockRetryDelayMs;
     private readonly bool _rotateOnBlock;
-
-    // TLS flags from curl_chrome116 wrapper — needed for Chrome TLS fingerprint
-    private const string TlsFlags =
-        "--ciphers TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256,"
-        + "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,"
-        + "ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,"
-        + "ECDHE-ECDSA-CHACHA20-POLY1305,ECDHE-RSA-CHACHA20-POLY1305,"
-        + "ECDHE-RSA-AES128-SHA,ECDHE-RSA-AES256-SHA,"
-        + "AES128-GCM-SHA256,AES256-GCM-SHA384,AES128-SHA,AES256-SHA"
-        + " --http2 --http2-no-server-push --compressed"
-        + " --tlsv1.2 --alps --tls-permute-extensions"
-        + " --cert-compression brotli";
-
-    // Dieselben TLS-Flags als einzelne argv-Tokens (kein Token enthält Leerzeichen → split by space).
-    // Werden über ProcessStartInfo.ArgumentList übergeben, nicht als ein String → keine Arg-Injektion.
-    private static readonly string[] TlsArgs = TlsFlags.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
     public ChessableHttpService(
         ILogger<ChessableHttpService> logger,
@@ -289,107 +270,6 @@ public class ChessableHttpService : IChessableHttpService
             return (false, 0, sw.ElapsedMilliseconds, ex.Message, "");
         }
     }
-
-    /// <summary>True, wenn der Body offensichtlich HTML/XML statt JSON ist (erstes
-    /// Nicht-Whitespace-Zeichen ist <c>&lt;</c>) — typisch für Login-Redirects,
-    /// Cloudflare-Block- oder Proxy-Gateway-Seiten.</summary>
-    internal static bool LooksLikeHtml(string content)
-    {
-        if (string.IsNullOrEmpty(content)) return false;
-        foreach (var c in content)
-        {
-            if (char.IsWhiteSpace(c)) continue;
-            return c == '<';
-        }
-        return false;
-    }
-
-    /// <summary>True, wenn der Body eine Cloudflare-Block-/Challenge-Seite ist
-    /// (HTTP 403 „you have been blocked" / „Attention Required" / Ray-ID).</summary>
-    internal static bool IsCloudflareBlockPage(string content)
-    {
-        if (string.IsNullOrEmpty(content)) return false;
-        return (content.Contains("cloudflare", StringComparison.OrdinalIgnoreCase)
-                && (content.Contains("Ray ID", StringComparison.OrdinalIgnoreCase)
-                    || content.Contains("cf-ray", StringComparison.OrdinalIgnoreCase)))
-            || content.Contains("Attention Required", StringComparison.OrdinalIgnoreCase)
-            || content.Contains("you have been blocked", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// Übersetzt eine Nicht-JSON-/Block-Antwort in eine handlungsleitende Meldung und unterscheidet
-    /// dabei die beiden grundverschiedenen Ursachen:
-    /// <list type="bullet">
-    /// <item><b>Token abgelaufen/ungültig</b> → der User muss einen neuen Bearer hinterlegen.</item>
-    /// <item><b>Zugriff blockiert</b> (Cloudflare-403, Token aber NICHT lokal abgelaufen) → mit
-    /// hoher Wahrscheinlichkeit die VPN-Ausgangs-IP gesperrt (z. B. M247) → IP rotieren/Server wechseln.</item>
-    /// </list>
-    /// Diskriminator ist der lokal aus dem JWT lesbare <c>exp</c>-Claim (<see cref="JwtHelper.IsExpired"/>):
-    /// ein nicht abgelaufener Bearer + Cloudflare-Block deutet auf die IP, nicht auf den Token.
-    /// </summary>
-    internal static string ClassifyBlockedResponse(string content, string? bearer)
-    {
-        bool tokenExpired = !string.IsNullOrEmpty(bearer) && SafeIsExpired(bearer);
-        if (tokenExpired)
-            return "Chessable-Token ist abgelaufen — bitte den Bearer neu hinterlegen.";
-
-        if (IsCloudflareBlockPage(content))
-            return "Zugriff von Chessable/Cloudflare blockiert (HTTP 403). Der Token ist nicht abgelaufen → " +
-                   "sehr wahrscheinlich ist die VPN-Ausgangs-IP gesperrt: IP rotieren bzw. VPN-Server wechseln. " +
-                   "Falls das nicht hilft, den Bearer prüfen.";
-
-        // HTML/sonstige Nicht-JSON-Antwort ohne eindeutige Cloudflare-Marker.
-        return "Chessable lieferte kein gültiges JSON (Token ungültig oder Zugriff blockiert) — " +
-               "bitte den Bearer neu hinterlegen bzw. die VPN-IP prüfen.";
-    }
-
-    private static bool SafeIsExpired(string bearer)
-    {
-        try { return JwtHelper.IsExpired(bearer); }
-        catch { return false; }
-    }
-
-    /// <summary>Erkennt einen Chessable-Fehler-Body (z. B. <c>{"error":{"message":"Expired token"}}</c>
-    /// oder <c>{"error":"…"}</c>) und liefert eine sprechende Meldung; sonst <c>null</c>.</summary>
-    public static string? TryGetChessableErrorMessage(string content) => TryGetChessableErrorMessage(content, out _);
-
-    /// <summary>Wie <see cref="TryGetChessableErrorMessage(string)"/>; <paramref name="tokenError"/> sagt, ob die
-    /// Meldung das Token betrifft („Expired token"/„Invalid token") — dann hilft kein Retry.</summary>
-    internal static string? TryGetChessableErrorMessage(string content, out bool tokenError)
-    {
-        tokenError = false;
-        try
-        {
-            using var doc = JsonDocument.Parse(content);
-            if (doc.RootElement.ValueKind != JsonValueKind.Object ||
-                !doc.RootElement.TryGetProperty("error", out var err))
-                return null;
-            var message = err.ValueKind switch
-            {
-                JsonValueKind.String => err.GetString(),
-                // `error.message` bevorzugen; ist sie leer (z. B. BOOK_NOT_OWNED liefert message:"" und
-                // die eigentliche Meldung in userFriendlyErrorMessage), auf userFriendlyErrorMessage
-                // zurückfallen. Sonst würde ein „You do not own this course" fälschlich als „Course has
-                // no chapters" durchrutschen.
-                JsonValueKind.Object => StringProp(err, "message") is { Length: > 0 } m ? m : StringProp(err, "userFriendlyErrorMessage"),
-                _ => null,
-            };
-            if (string.IsNullOrWhiteSpace(message)) return null;
-            // „Expired token" / „Invalid token" → eindeutiger Hinweis auf einen neuen Bearer.
-            tokenError = message.Contains("token", StringComparison.OrdinalIgnoreCase);
-            return tokenError
-                ? $"Chessable-Token abgelaufen/ungültig ({message}) — bitte den Bearer neu hinterlegen."
-                : $"Chessable: {message}";
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    /// <summary>Liefert eine String-Property eines JSON-Objekts oder null (nicht vorhanden/kein String).</summary>
-    private static string? StringProp(JsonElement obj, string name)
-        => obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
     public async Task<(RestResponseCourse? data, string? error)> FetchCourseDataAsync(
         string bearer, string uid, string bid,
@@ -726,10 +606,6 @@ public class ChessableHttpService : IChessableHttpService
         return result;
     }
 
-    /// <summary>True, wenn die Antwort ein IP-Soft-Block ist: leer oder nur <c>{}</c> (Länge ≤ 2)
-    /// trotz erfolgreichem Transport — Chessables Signatur für eine request-rate-geblockte IP.</summary>
-    internal static bool IsSoftBlockedBody(string? body) => string.IsNullOrEmpty(body) || body.Length <= 2;
-
     private async Task<string> CurlPostAsync(string url, string body, string endpoint, string? chessableUid, CancellationToken ct)
     {
         using var lease = await _vpn.AcquireAsync(ct);
@@ -787,12 +663,6 @@ public class ChessableHttpService : IChessableHttpService
     }
 
     /// <summary>
-    /// Erkennt einen transienten gluetun-Proxy-Ausfall: curl bricht mit „CONNECT
-    /// tunnel failed, response 503" ab, während die VPN-IP rotiert/reconnectet.
-    /// Solche Fehler sind nach wenigen Sekunden von selbst weg → ein Retry lohnt,
-    /// im Gegensatz zu echten Fehlern (DNS, 401, …).
-    /// </summary>
-    /// <summary>
     /// Parst den getList-Body zu <see cref="ResponseChapter"/>. Liefert null, wenn er die gemeinsame Prüfregel
     /// (<see cref="ChessableContent.ChapterReason"/>) nicht besteht: leer/<c>{}</c>, abgeschnittenes/korruptes
     /// JSON oder ein Chessable-Fehlerkörper → Signal zum Neu-Holen. Ein legitim leeres Kapitel
@@ -815,92 +685,6 @@ public class ChessableHttpService : IChessableHttpService
     /// <summary>True, wenn der getGame-Body die gemeinsame Prüfregel besteht (<see cref="ChessableContent.LineReason"/>:
     /// parst als <see cref="ResponseLine"/>, trägt ein game-Objekt, ist kein Chessable-Fehlerkörper).</summary>
     private static bool LineParses(string? content) => ChessableContent.LineReason(content) is null;
-
-    public static bool IsTransientProxyFailure(int exitCode, string? error)
-    {
-        if (string.IsNullOrEmpty(error))
-            return false;
-
-        return error.Contains("CONNECT tunnel failed", StringComparison.OrdinalIgnoreCase)
-            || error.Contains("response 503", StringComparison.OrdinalIgnoreCase)
-            || error.Contains("HTTP code 503 from proxy", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static void AddHeader(List<string> args, string header)
-    {
-        args.Add("-H");
-        args.Add(header);
-    }
-
-    /// <summary>
-    /// Baut die curl-Argumente als EINZELNE argv-Tokens (für <see cref="ProcessStartInfo.ArgumentList"/>).
-    /// Jeder Wert — inkl. URL (mit user-naher bid) — ist ein eigenständiges Argument; .NET
-    /// escaped sie pro-Token. Dadurch kann KEIN Eingabewert curl-Flags injizieren (vorher floss die URL
-    /// als <c>"{url}"</c> in einen Args-String → ein <c>"</c> in der bid konnte z.B. <c>-o</c>/<c>--config</c>
-    /// einschleusen und Dateien lesen/schreiben).
-    /// Der Bearer steht NICHT in den Argumenten (sonst für jedes lokale Konto in <c>/proc/&lt;pid&gt;/cmdline</c>
-    /// lesbar): an seiner Stelle liest <c>-H @-</c> den Authorization-Header aus stdin
-    /// (<see cref="BuildGetHeaderStdin"/>). curl fügt ihn genau dort ein → Header-Reihenfolge unverändert.
-    /// </summary>
-    public static List<string> BuildGetArgs(string url, int maxTimeSec = 20)
-    {
-        var args = new List<string> { "-s", "-S", "--connect-timeout", CurlConnectTimeoutSec.ToString(),
-            "--max-time", maxTimeSec.ToString() };
-        args.AddRange(TlsArgs);
-        AddHeader(args, "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0");
-        AddHeader(args, "accept: application/json, text/plain, */*");
-        AddHeader(args, "accept-language: en");
-        AddHeader(args, "platform: Web");
-        AddHeader(args, "x-os-name: Firefox");
-        AddHeader(args, "x-os-version: 138");
-        AddHeader(args, "x-device-model: Windows");
-        AddHeader(args, "@-"); // authorization: Bearer … aus stdin (BuildGetHeaderStdin)
-        AddHeader(args, "alt-used: www.chessable.com");
-        AddHeader(args, "connection: keep-alive");
-        AddHeader(args, "sec-fetch-dest: empty");
-        AddHeader(args, "sec-fetch-mode: cors");
-        AddHeader(args, "sec-fetch-site: same-origin");
-        AddHeader(args, "priority: u=0");
-        AddHeader(args, "te: trailers");
-        AddHeader(args, "pragma: no-cache");
-        AddHeader(args, "cache-control: no-cache");
-        args.Add(url);
-        return args;
-    }
-
-    /// <summary>stdin-Text zu <see cref="BuildGetArgs"/> (<c>-H @-</c>): genau eine Header-Zeile mit dem Bearer.
-    /// CR/LF werden entfernt, weil curl jede Zeile der Header-Datei als eigenen Header liest.</summary>
-    public static string BuildGetHeaderStdin(string bearer)
-        => $"authorization: Bearer {bearer.Replace("\r", "").Replace("\n", "")}\n";
-
-    /// <summary>Wie <see cref="BuildGetArgs"/>, für POST (Body via stdin, <c>-d @-</c>).</summary>
-    public static List<string> BuildPostArgs(string url)
-    {
-        var args = new List<string> { "-s", "-S", "--connect-timeout", CurlConnectTimeoutSec.ToString() };
-        args.AddRange(TlsArgs);
-        args.Add("-X"); args.Add("POST");
-        AddHeader(args, "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0");
-        AddHeader(args, "accept: application/json, text/plain, */*");
-        AddHeader(args, "accept-language: en");
-        AddHeader(args, "referer: https://www.chessable.com/login/");
-        AddHeader(args, "content-type: application/json;charset=utf-8");
-        AddHeader(args, "platform: Web");
-        AddHeader(args, "x-os-name: Firefox");
-        AddHeader(args, "x-os-version: 137");
-        AddHeader(args, "x-device-model: Windows");
-        AddHeader(args, "origin: https://www.chessable.com");
-        AddHeader(args, "alt-used: www.chessable.com");
-        AddHeader(args, "connection: keep-alive");
-        AddHeader(args, "sec-fetch-dest: empty");
-        AddHeader(args, "sec-fetch-mode: cors");
-        AddHeader(args, "sec-fetch-site: same-origin");
-        AddHeader(args, "dnt: 1");
-        AddHeader(args, "sec-gpc: 1");
-        AddHeader(args, "priority: u=0");
-        args.Add("-d"); args.Add("@-"); // read body from stdin
-        args.Add(url);
-        return args;
-    }
 
     private static string ComputeSha512Hash(string input)
     {

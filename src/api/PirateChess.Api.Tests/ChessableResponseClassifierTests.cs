@@ -45,14 +45,14 @@ public class ChessableResponseClassifierTests
     public void Head_IsClassifiedAsBefore(string body, bool html, bool cloudflare, bool softBlock,
         string? chessableError, bool tokenError, string classifyWithoutBearer)
     {
-        Assert.Equal(html, ChessableHttpService.LooksLikeHtml(body));
-        Assert.Equal(cloudflare, ChessableHttpService.IsCloudflareBlockPage(body));
-        Assert.Equal(softBlock, ChessableHttpService.IsSoftBlockedBody(body));
-        Assert.Equal(chessableError, ChessableHttpService.TryGetChessableErrorMessage(body));
-        Assert.Equal(chessableError, ChessableHttpService.TryGetChessableErrorMessage(body, out var isTokenError));
+        Assert.Equal(html, ChessableResponseClassifier.LooksLikeHtml(body));
+        Assert.Equal(cloudflare, ChessableResponseClassifier.IsCloudflareBlockPage(body));
+        Assert.Equal(softBlock, ChessableResponseClassifier.IsSoftBlockedBody(body));
+        Assert.Equal(chessableError, ChessableResponseClassifier.TryGetChessableErrorMessage(body));
+        Assert.Equal(chessableError, ChessableResponseClassifier.TryGetChessableErrorMessage(body, out var isTokenError));
         Assert.Equal(tokenError, isTokenError);
-        Assert.Equal(classifyWithoutBearer, ChessableHttpService.ClassifyBlockedResponse(body, null));
-        Assert.Equal(classifyWithoutBearer, ChessableHttpService.ClassifyBlockedResponse(body, "kein.jwt"));
+        Assert.Equal(classifyWithoutBearer, ChessableResponseClassifier.ClassifyBlockedResponse(body, null));
+        Assert.Equal(classifyWithoutBearer, ChessableResponseClassifier.ClassifyBlockedResponse(body, "kein.jwt"));
     }
 
     [Theory]
@@ -63,5 +63,5 @@ public class ChessableResponseClassifierTests
     [InlineData(0, "", false)]
     [InlineData(0, null, false)]
     public void TransientProxyFailure_Table(int exitCode, string? stderr, bool expected)
-        => Assert.Equal(expected, ChessableHttpService.IsTransientProxyFailure(exitCode, stderr));
+        => Assert.Equal(expected, ChessableResponseClassifier.IsTransientProxyFailure(exitCode, stderr));
 }
