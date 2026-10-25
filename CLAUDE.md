@@ -49,8 +49,10 @@ haben keinen Aufrufer mehr: die Registrierung ist standardmaessig aus
   Double-Check -> Fetch -> `RawCourseCache.SetAsync`), `TrainingMode` an einer Stelle, Browser-Parse in
   `BrowserCourseParseService`. `course/start` legt einen Job in `CourseFetchJobStore` an (Poll per GET,
   Abbruch per DELETE oder beim Container-Stopp).
-- `ChessableHttpService`: Orchestrierung des Chessable-Abrufs (Retry, Block-Erkennung, VPN-Lease);
-  Prozess in `CurlRunner`, jede Rohantwort als Audit-Zeile ueber `RawResponseAudit`.
+- `ChessableHttpService`: Fassade des Chessable-Abrufs (Login, Kursliste, Schaetzung, Diagnose); tiefer Kursabruf
+  in `ChessableCourseFetcher` (Retry, Pruefregel, Linien-Cache; Rueckmeldungen per `CourseFetchOptions`), je
+  Request `ChessableCurlTransport` (VPN-Lease, Soft-Block, Audit ueber `RawResponseAudit`), Prozess in `CurlRunner`,
+  Argumente/Fingerprint in `ChessableCurlArgs`, reine Antwort-Klassifikation in `ChessableResponseClassifier`.
 - Caches: `RawCourseCache` (Kurs + Kapitel), `RawLineCache` (dauerhafter Linien-Cache, nie loeschen, nur
   als ungueltig markieren).
 - `ChessableRawResponses` (Audit, gzip+Base64) ist zugleich die einzige Quelle der Kurs-/Kapitelstruktur fuer

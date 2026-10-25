@@ -372,12 +372,14 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
     public async Task Fetch_ProgressCallbacks_FireInTheSameOrderAndFormat()
     {
         var events = new List<string>();
-        var (data, error) = await Build(runner: ValidCourseRunner()).FetchCourseDataAsync("b", "1", "777",
-            onChapterProgress: s => events.Add("chapter " + s),
-            onLineProgress: s => events.Add("line " + s),
-            onCumulativeLines: s => events.Add("cum " + s),
-            onRetry: s => events.Add("retry " + s),
-            onTotalLines: n => events.Add("total " + n));
+        var (data, error) = await Build(runner: ValidCourseRunner()).FetchCourseDataAsync("b", "1", "777", new CourseFetchOptions
+        {
+            OnChapterProgress = s => events.Add("chapter " + s),
+            OnLineProgress = s => events.Add("line " + s),
+            OnCumulativeLines = s => events.Add("cum " + s),
+            OnRetry = s => events.Add("retry " + s),
+            OnTotalLines = n => events.Add("total " + n),
+        });
 
         Assert.Null(error);
         Assert.Equal(2, data!.ChapterList.Count);
@@ -395,7 +397,7 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         var retries = new List<string>();
         var runner = ValidCourseRunner(url => url.EndsWith("oid=12") ? new CurlResult(0, "{}", "") : null);
 
-        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", onRetry: retries.Add);
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", new CourseFetchOptions { OnRetry = retries.Add });
 
         Assert.Null(error);
         var line = data!.ChapterList[0].ResponseLineList[1];
@@ -415,7 +417,7 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         const string truncated = "{\"list\":{\"name\":\"K2\",\"data\":[{\"id\":2";
         var runner = ValidCourseRunner(url => url.EndsWith("lid=2") ? new CurlResult(0, truncated, "") : null);
 
-        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", onRetry: retries.Add);
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", new CourseFetchOptions { OnRetry = retries.Add });
 
         Assert.Null(error);
         Assert.Equal(2, data!.ChapterList.Count);
@@ -474,7 +476,7 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         await new RawLineCache(_scopeFactory, NullLogger<RawLineCache>.Instance).SetAsync(11, cachedLine, "777");
         var runner = ValidCourseRunner();
 
-        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", bypassLineCache: bypass);
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", new CourseFetchOptions { BypassLineCache = bypass });
 
         Assert.Null(error);
         Assert.Equal(expectedLineCalls, runner.Calls.Count(c => c.Args[^1].EndsWith("oid=11")));

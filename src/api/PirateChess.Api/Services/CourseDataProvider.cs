@@ -56,10 +56,13 @@ public class CourseDataProvider
                 return new CourseDataResult(data, false, null);
 
             var (fetched, fetchError) = await _chessableHttp.FetchCourseDataAsync(bearer, uid, bid,
-                onChapterProgress: onChapterProgress,
-                onCumulativeLines: onCumulativeLines,
-                onTotalLines: onTotalLines,
-                bypassLineCache: forceRefresh,
+                new CourseFetchOptions
+                {
+                    OnChapterProgress = onChapterProgress,
+                    OnCumulativeLines = onCumulativeLines,
+                    OnTotalLines = onTotalLines,
+                    BypassLineCache = forceRefresh,
+                },
                 ct: ct);
             // Der Kursabruf meldet einen Abbruch teils als Fehlertext statt als Ausnahme.
             ct.ThrowIfCancellationRequested();

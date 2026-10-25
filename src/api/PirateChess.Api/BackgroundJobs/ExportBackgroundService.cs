@@ -152,35 +152,38 @@ public class ExportBackgroundService : BackgroundService
         // --- Data fetch phase via ChessableHttpService ---
         var (fetchedData, fetchError) = await _chessableHttp.FetchCourseDataAsync(
             bearer, uid, job.ChessableBid,
-            onChapterProgress: counter =>
+            new CourseFetchOptions
             {
-                var parts = counter.Split('/');
-                if (parts.Length == 2)
+                OnChapterProgress = counter =>
                 {
-                    int.TryParse(parts[0].Trim(), out chaptersDone);
-                    int.TryParse(parts[1].Trim(), out chaptersTotal);
-                }
+                    var parts = counter.Split('/');
+                    if (parts.Length == 2)
+                    {
+                        int.TryParse(parts[0].Trim(), out chaptersDone);
+                        int.TryParse(parts[1].Trim(), out chaptersTotal);
+                    }
 
-                var msg = new ExportProgressMessage(
-                    job.ExportId, "Chapter", $"Chapter {counter}",
-                    chaptersDone, chaptersTotal, linesDone);
-                NotifyProgress(userGroup, msg);
-            },
-            onCumulativeLines: total =>
-            {
-                int.TryParse(total.Trim(), out linesDone);
+                    var msg = new ExportProgressMessage(
+                        job.ExportId, "Chapter", $"Chapter {counter}",
+                        chaptersDone, chaptersTotal, linesDone);
+                    NotifyProgress(userGroup, msg);
+                },
+                OnCumulativeLines = total =>
+                {
+                    int.TryParse(total.Trim(), out linesDone);
 
-                var msg = new ExportProgressMessage(
-                    job.ExportId, "Line", $"Lines: {total}",
-                    chaptersDone, chaptersTotal, linesDone);
-                NotifyProgress(userGroup, msg);
-            },
-            onRetry: retryMsg =>
-            {
-                var msg = new ExportProgressMessage(
-                    job.ExportId, "Retry", retryMsg,
-                    chaptersDone, chaptersTotal, linesDone);
-                NotifyProgress(userGroup, msg);
+                    var msg = new ExportProgressMessage(
+                        job.ExportId, "Line", $"Lines: {total}",
+                        chaptersDone, chaptersTotal, linesDone);
+                    NotifyProgress(userGroup, msg);
+                },
+                OnRetry = retryMsg =>
+                {
+                    var msg = new ExportProgressMessage(
+                        job.ExportId, "Retry", retryMsg,
+                        chaptersDone, chaptersTotal, linesDone);
+                    NotifyProgress(userGroup, msg);
+                },
             },
             ct: ct);
 

@@ -13,17 +13,10 @@ public interface IChessableHttpService
     Task<(Dictionary<string, string>? courses, string? error)> GetCoursesAsync(
         string bearer, string uid, CancellationToken ct = default, int? pinnedTunnel = null);
 
+    /// <summary>Tiefer Kursabruf (Struktur, Kapitel, Linien). Rückmeldungen und Linien-Cache-Bypass in
+    /// <paramref name="options"/> (null = <see cref="CourseFetchOptions.Default"/>).</summary>
     Task<(RestResponseCourse? data, string? error)> FetchCourseDataAsync(
-        string bearer, string uid, string bid,
-        Action<string>? onChapterProgress = null,
-        Action<string>? onLineProgress = null,
-        Action<string>? onCumulativeLines = null,
-        Action<string>? onRetry = null,
-        Action<int>? onTotalLines = null,
-        /// <summary>Force-Refresh: den Linien-Resume-Cache übergehen (statt ihn vorher zu löschen —
-        /// bei einem gescheiterten Abruf bliebe sonst nichts übrig).</summary>
-        bool bypassLineCache = false,
-        CancellationToken ct = default);
+        string bearer, string uid, string bid, CourseFetchOptions? options = null, CancellationToken ct = default);
 
     Task<(int? totalLines, string? error)> GetCourseLineCountAsync(
         string bearer, string uid, string bid, CancellationToken ct = default);

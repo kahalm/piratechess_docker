@@ -37,14 +37,7 @@ public class FakeChessableHttpService : IChessableHttpService
     }
 
     public Task<(RestResponseCourse? data, string? error)> FetchCourseDataAsync(
-        string bearer, string uid, string bid,
-        Action<string>? onChapterProgress = null,
-        Action<string>? onLineProgress = null,
-        Action<string>? onCumulativeLines = null,
-        Action<string>? onRetry = null,
-        Action<int>? onTotalLines = null,
-        bool bypassLineCache = false,
-        CancellationToken ct = default)
+        string bearer, string uid, string bid, CourseFetchOptions? options = null, CancellationToken ct = default)
     {
         var course = new RestResponseCourse
         {
