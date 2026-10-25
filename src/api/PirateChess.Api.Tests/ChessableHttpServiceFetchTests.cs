@@ -356,6 +356,142 @@ public sealed class ChessableHttpServiceFetchTests : IDisposable
         Assert.Equal(["course", "course", "chapter", "line"], await AuditedEndpointsAsync());
     }
 
+    // --- Charakterisierung vor der Zerlegung Z46 (Kursabruf in ChessableCourseFetcher): Fortschritt, Retry-Texte,
+    // Strukturfehler, Linien-Cache. Alles über den In-Memory-Runner, ohne Prozess und ohne Chessable.
+
+    private static FakeCurlRunner ValidCourseRunner(Func<string, CurlResult?>? overrideFor = null) => new(url =>
+    {
+        if (overrideFor?.Invoke(url) is { } r) return r;
+        if (url.Contains("getCourse")) return new CurlResult(0, "{\"course\":{\"data\":[{\"id\":1,\"total\":2},{\"id\":2,\"total\":1}]}}", "");
+        if (url.EndsWith("lid=1")) return new CurlResult(0, "{\"list\":{\"name\":\"K1\",\"data\":[{\"id\":11},{\"id\":12}]}}", "");
+        if (url.EndsWith("lid=2")) return new CurlResult(0, "{\"list\":{\"name\":\"K2\",\"data\":[{\"id\":21}]}}", "");
+        return new CurlResult(0, ValidLine, "");
+    });
+
+    [Fact]
+    public async Task Fetch_ProgressCallbacks_FireInTheSameOrderAndFormat()
+    {
+        var events = new List<string>();
+        var (data, error) = await Build(runner: ValidCourseRunner()).FetchCourseDataAsync("b", "1", "777",
+            onChapterProgress: s => events.Add("chapter " + s),
+            onLineProgress: s => events.Add("line " + s),
+            onCumulativeLines: s => events.Add("cum " + s),
+            onRetry: s => events.Add("retry " + s),
+            onTotalLines: n => events.Add("total " + n));
+
+        Assert.Null(error);
+        Assert.Equal(2, data!.ChapterList.Count);
+        Assert.Equal(new[]
+        {
+            "total 3",
+            "chapter 1 / 2", "cum 1", "line 1 / 2", "cum 2", "line 2 / 2",
+            "chapter 2 / 2", "cum 3", "line 1 / 1",
+        }, events);
+    }
+
+    [Fact]
+    public async Task Fetch_LineSoftBlockedTenTimes_IsSkippedWithRetryTexts_NotCached()
+    {
+        var retries = new List<string>();
+        var runner = ValidCourseRunner(url => url.EndsWith("oid=12") ? new CurlResult(0, "{}", "") : null);
+
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", onRetry: retries.Add);
+
+        Assert.Null(error);
+        var line = data!.ChapterList[0].ResponseLineList[1];
+        Assert.Equal(12, line.Oid);
+        Assert.Equal("{}", line.LineJsonContent);
+        Assert.Equal(10, runner.Calls.Count(c => c.Args[^1].EndsWith("oid=12")));
+        Assert.Equal(Enumerable.Range(1, 9).Select(i => $"[002.003] Retry {i}/10 ...")
+            .Append("[002.003] FAILED after 10 attempts, skipping."), retries);
+        Assert.False(await LineCachedAsync(12));
+        Assert.True(await LineCachedAsync(11));
+    }
+
+    [Fact]
+    public async Task Fetch_ChapterTruncatedFourTimes_BecomesEmptyChapter_WithRetryTexts()
+    {
+        var retries = new List<string>();
+        const string truncated = "{\"list\":{\"name\":\"K2\",\"data\":[{\"id\":2";
+        var runner = ValidCourseRunner(url => url.EndsWith("lid=2") ? new CurlResult(0, truncated, "") : null);
+
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", onRetry: retries.Add);
+
+        Assert.Null(error);
+        Assert.Equal(2, data!.ChapterList.Count);
+        Assert.Empty(data.ChapterList[1].ResponseLineList);
+        Assert.Equal(truncated, data.ChapterList[1].ChapterJsonContent);
+        Assert.Equal(4, runner.Calls.Count(c => c.Args[^1].EndsWith("lid=2")));
+        Assert.Equal(Enumerable.Range(1, 3).Select(i => $"Kapitel 2: unvollständig, Retry {i}/4 ..."), retries);
+    }
+
+    public static TheoryData<string, int, string, int> StructureFailures => new()
+    {
+        // Antwort von getCourse (immer gleich), curl-Exit, erwarteter Fehler, erwartete getCourse-Aufrufe
+        { "", 0, "Empty course response", 4 },
+        { "{}", 0, "Empty course response", 4 },
+        { "{\"error\":{\"message\":\"Expired token\"}}", 0,
+            "Chessable-Token abgelaufen/ungültig (Expired token) — bitte den Bearer neu hinterlegen.", 1 },
+        { "<html><body>you have been blocked</body></html>", 0,
+            "Zugriff von Chessable/Cloudflare blockiert (HTTP 403). Der Token ist nicht abgelaufen → " +
+            "sehr wahrscheinlich ist die VPN-Ausgangs-IP gesperrt: IP rotieren bzw. VPN-Server wechseln. " +
+            "Falls das nicht hilft, den Bearer prüfen.", 1 },
+        { "{\"course\":{\"data\":[{\"id\":", 0, "Failed to parse course JSON", 1 },
+        { "{\"course\":{\"data\":[]}}", 0, "Course has no chapters", 1 },
+        { "", 56, "Failed to fetch course (proxy tunnel unavailable): curl: (56) CONNECT tunnel failed, response 503", 4 },
+    };
+
+    [Theory]
+    [MemberData(nameof(StructureFailures))]
+    public async Task Fetch_StructureFailure_SameErrorAndAttempts(string body, int exitCode, string expected, int courseCalls)
+    {
+        var stderr = exitCode == 0 ? "" : "curl: (56) CONNECT tunnel failed, response 503";
+        var runner = new FakeCurlRunner(_ => new CurlResult(exitCode, body, stderr));
+
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777");
+
+        Assert.Null(data);
+        Assert.Equal(expected, error);
+        Assert.Equal(courseCalls, runner.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Fetch_RunnerThrows_StructureFailsWithMessage()
+    {
+        var runner = new FakeCurlRunner(_ => throw new InvalidOperationException("kein curl"));
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777");
+        Assert.Null(data);
+        Assert.Equal("Failed to fetch course: kein curl", error);
+        Assert.Equal(["course"], await AuditedEndpointsAsync());
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 1)]
+    public async Task Fetch_CachedLine_IsReusedUnlessBypassed(bool bypass, int expectedLineCalls)
+    {
+        const string cachedLine = "{\"game\":{\"color\":\"black\"}}";
+        await new RawLineCache(_scopeFactory, NullLogger<RawLineCache>.Instance).SetAsync(11, cachedLine, "777");
+        var runner = ValidCourseRunner();
+
+        var (data, error) = await Build(runner: runner).FetchCourseDataAsync("b", "1", "777", bypassLineCache: bypass);
+
+        Assert.Null(error);
+        Assert.Equal(expectedLineCalls, runner.Calls.Count(c => c.Args[^1].EndsWith("oid=11")));
+        Assert.Equal(bypass ? ValidLine : cachedLine, data!.ChapterList[0].ResponseLineList[0].LineJsonContent);
+    }
+
+    [Fact]
+    public async Task CourseLineCount_SumsVariations_FallsBackToTotal()
+    {
+        var runner = new FakeCurlRunner(_ => new CurlResult(0,
+            "{\"course\":{\"data\":[{\"id\":1,\"total\":5,\"variations\":[{},{}]},{\"id\":2,\"total\":3}]}}", ""));
+        var (total, error) = await Build(runner: runner).GetCourseLineCountAsync("b", "1", "777");
+        Assert.Null(error);
+        Assert.Equal(5, total);
+        Assert.Single(runner.Calls);
+    }
+
     /// <summary>In-Memory-<see cref="ICurlRunner"/>: antwortet je URL (letztes Argument) und zeichnet jeden Lauf auf.</summary>
     private sealed class FakeCurlRunner(Func<string, CurlResult> respond) : ICurlRunner
     {
