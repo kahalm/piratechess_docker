@@ -1,0 +1,53 @@
+﻿using System.Text.RegularExpressions;
+
+namespace piratechess_lib
+{
+    /// <summary>Bereinigt Chessable-Kommentartext für einen PGN-Kommentar <c>{…}</c> (Marker, HTML, Klammern, Leerraum).
+    /// Aus <c>JsonMoveItemList</c> herausgelöst (Zerlegung Z48).</summary>
+    internal static partial class CommentText
+    {
+        internal static string Clean(string comment)
+        {
+            comment = comment.Replace("@@StartBracket@@", "(").Replace("@@EndBracket@@", ")");
+            comment = findFenTags().Replace(comment, "");
+            comment = comment.Replace("@@StartBlockQuote@@", "").Replace("@@EndBlockQuote@@", "");
+            comment = comment.Replace("@@LinkStart@@", "").Replace("@@LinkEnd@@", "");
+            comment = comment.Replace("@@SANStart@@", "").Replace("@@SANEnd@@", "");
+            comment = comment.Replace("@@HeaderStart@@", "").Replace("@@HeaderEnd@@", "");
+            comment = comment.Replace("<br/>", "").Replace("<br>", "");
+            comment = comment.Replace("</strong>", "").Replace("<strong>", "");
+            comment = comment.Replace("</bold>", "").Replace("<bold>", "");
+            comment = findHtmltags().Replace(comment, "");
+
+            // Geschweifte Klammern aus dem Chessable-Text neutralisieren: der Kommentar wird später in
+            // PGN als {…} gewrappt — ein „}" im Text beendet den Kommentar vorzeitig und der Rest rutscht
+            // als Müll in den Movetext (Linie/Kurs wird beim Import unlesbar). PGN kennt kein Escaping
+            // innerhalb von {…}, also durch runde Klammern ersetzen (die kommen dort ohnehin vor,
+            // siehe @@StartBracket@@ oben).
+            comment = comment.Replace('{', '(').Replace('}', ')');
+
+            // Eckige Klammern ebenso (S2-017): aus Kommentartext dürfen weder PGN-Tags („[Event …]",
+            // „[ChessableOid …]" — rookhub zerlegt an „[Event " und liest die oid je Block) noch Kommandos
+            // („[%tqu", „[%info", „[%alt", „[%cal", „[%csl") entstehen. Mehrere Teile vor einem Zug werden mit
+            // Zeilenumbruch verbunden, „[Event" stünde dann sogar am Zeilenanfang. Die selbst erzeugten Marker
+            // kommen erst in GeneratePGN dazu, NACH dieser Ersetzung, und bleiben unberührt.
+            comment = comment.Replace('[', '(').Replace(']', ')');
+
+            // Leerraum wie im Chessable-Export: Chessable schreibt Absätze als „ <br/><br/> ", und entfernte
+            // FEN-Marker hinterlassen Leerzeichen am Rand — sonst doppelte Leerzeichen und „Zugfolge }".
+            comment = findWhitespace().Replace(comment, " ").Trim();
+
+            return comment;
+        }
+
+        [GeneratedRegex("<[^>]*>")]
+        private static partial Regex findHtmltags();
+
+        [GeneratedRegex(@"\s+")]
+        private static partial Regex findWhitespace();
+
+        [GeneratedRegex(@"@@StartFEN@@(.+?)@@EndFEN@@")]
+        private static partial Regex findFenTags();
+
+    }
+}
