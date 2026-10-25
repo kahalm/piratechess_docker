@@ -1,0 +1,50 @@
+name=Sizilianisch
+errors=0
+
+[Event "Französisch \"Vorstoß\""]
+[Round "002.002"]
+[White "3.e5 c5"]
+[Black "Golden"]
+[FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"]
+[Result "*"]
+[ChessableOid "20733162"]
+                        [ChessableColor "white"]
+                        
+{willkommen zum ersten Kapitel. Es gibt nichts, wenn er 2.d4 spielen kann. Alles außer 2.d4.} 1. e4 e6 {[%alt e5 c5]} 2. Nf3 {[%cal Gf3e5]} (2.d3 d5 3.Nf3 {analysiert.}) 2... d5 3. e5 (3.Nc3 Nf6 {werden wir später sehen.}) (3.d3 {ist hier in der Zugfolge}) 3... c5 4. b4 {Flügelgambit} *
+
+
+[Event "Französisch \"Vorstoß\""]
+[Round "002.003"]
+[White "KID 16.Dxd6"]
+[Black "Golden"]
+[FEN "r2q2k1/pp2rpb1/2np2pp/2N5/2P5/2NQ2Pb/PP2PP1P/R1BR2K1 w - - 3 16"]
+[Result "*"]
+[ChessableOid "4711"]
+                        [ChessableColor "white"]
+                        
+16. Qxd6 (16.N3e4 Bf5 17.Nxb7) (16.N5e4 Bf5) 16... Qxd6 {16.Ne4 is a better try, although we have full compensation after Bf5.} 17. Rxd6 {[%csl Rd6]} *
+
+
+[Event "Sizilianisch"]
+[Round "003.002"]
+[White "1...c5"]
+[Black "Golden"]
+[FEN "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"]
+[Result "*"]
+[ChessableOid "815"]
+                        [ChessableColor "black"]
+                        
+1... c5 2. Nf3 d6 {Weiter im nächsten Kapitel.} *
+
+
+[Event "Sizilianisch"]
+[Round "003.003"]
+[White "Info"]
+[Black "Golden"]
+[FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"]
+[Result "*"]
+[ChessableOid "816"]
+                        [ChessableColor "white"]
+                        
+{[%info]} 1. d4 Nf6 *
+
