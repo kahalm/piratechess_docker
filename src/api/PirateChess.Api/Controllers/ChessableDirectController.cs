@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using Serilog.Context;
 using PirateChess.Api.Authorization;
 using PirateChess.Api.Models.DTOs;
 using PirateChess.Api.Services;
@@ -25,6 +24,7 @@ public class ChessableDirectController : ControllerBase
 {
     private readonly IChessableHttpService _chessableHttp;
     private readonly CourseFetchJobStore _jobStore;
+    private readonly CourseFetchJobRunner _jobRunner;
     private readonly RawCourseCache _rawCache;
     private readonly RawLineCache _lineCache;
     private readonly CourseDataProvider _courseData;
@@ -32,12 +32,12 @@ public class ChessableDirectController : ControllerBase
     private readonly RawCourseReconstructor _reconstructor;
     private readonly VpnIpHealth _ipHealth;
     private readonly IVpnRotationService _vpn;
-    private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<ChessableDirectController> _logger;
 
     public ChessableDirectController(
         IChessableHttpService chessableHttp,
         CourseFetchJobStore jobStore,
+        CourseFetchJobRunner jobRunner,
         RawCourseCache rawCache,
         RawLineCache lineCache,
         CourseDataProvider courseData,
@@ -45,11 +45,11 @@ public class ChessableDirectController : ControllerBase
         RawCourseReconstructor reconstructor,
         VpnIpHealth ipHealth,
         IVpnRotationService vpn,
-        IHostApplicationLifetime lifetime,
         ILogger<ChessableDirectController> logger)
     {
         _chessableHttp = chessableHttp;
         _jobStore = jobStore;
+        _jobRunner = jobRunner;
         _rawCache = rawCache;
         _lineCache = lineCache;
         _courseData = courseData;
@@ -57,7 +57,6 @@ public class ChessableDirectController : ControllerBase
         _reconstructor = reconstructor;
         _ipHealth = ipHealth;
         _vpn = vpn;
-        _lifetime = lifetime;
         _logger = logger;
     }
 
@@ -67,6 +66,26 @@ public class ChessableDirectController : ControllerBase
     /// erst bis dorthin kommen) und teure Chessable-Abrufe auslösen.</summary>
     private static bool IsValidBid(string? bid)
         => !string.IsNullOrEmpty(bid) && bid.Length <= 12 && bid.All(char.IsAsciiDigit);
+
+    /// <summary>uid aus dem Bearer; bei Fehler steht die 400-Antwort in <paramref name="error"/>.</summary>
+    private bool TryGetUid(string bearer, out string uid, out IActionResult? error)
+    {
+        var (u, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
+        uid = u;
+        error = uidError is null ? null : BadRequest(new { message = uidError });
+        return error is null;
+    }
+
+    /// <summary>Optionaler Bearer der Kurs-Endpoints: leer → leere uid (nur der Cache-Pfad ist dann möglich).</summary>
+    private bool TryGetOptionalUid(string bearer, out string uid, out IActionResult? error)
+    {
+        uid = string.Empty;
+        error = null;
+        return string.IsNullOrWhiteSpace(bearer) || TryGetUid(bearer, out uid, out error);
+    }
+
+    /// <summary>Leerer bzw. „{}"-Fehler der Kursliste heißt: der Bearer taugt nicht.</summary>
+    private static string CleanBearerError(string error) => error.Trim() is "{}" or "" ? "Invalid bearer" : error;
 
     /// <summary>Per-IP-Auswertung: wie viele Requests/Blocks pro VPN-Ausgangs-IP (über alle Rotationen),
     /// schlechteste zuerst. Für „welche IP ist immer wieder schlecht".</summary>
@@ -101,16 +120,12 @@ public class ChessableDirectController : ControllerBase
         if (pin is int idx && (idx < 0 || idx >= _vpn.TunnelCount))
             return BadRequest(new { message = $"Ungültiger Tunnel-Index {idx}. Verfügbar: 0..{_vpn.TunnelCount - 1}." });
 
-        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
-        if (uidError is not null)
-            return BadRequest(new { message = uidError });
+        if (!TryGetUid(request.Bearer, out var uid, out var uidError))
+            return uidError!;
 
         var (courses, error) = await _chessableHttp.GetCoursesAsync(request.Bearer, uid, ct, pin);
         if (error is not null)
-        {
-            var cleanMessage = error.Trim() is "{}" or "" ? "Invalid bearer" : error;
-            return BadRequest(new { message = cleanMessage });
-        }
+            return BadRequest(new { message = CleanBearerError(error) });
 
         // Bei gepinntem Test zusätzlich melden, über welchen Tunnel + welche Exit-IP getestet wurde.
         string? proxy = null, exitIp = null;
@@ -130,16 +145,12 @@ public class ChessableDirectController : ControllerBase
         if (string.IsNullOrWhiteSpace(request?.Bearer))
             return BadRequest(new { message = "Bearer is required" });
 
-        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
-        if (uidError is not null)
-            return BadRequest(new { message = uidError });
+        if (!TryGetUid(request.Bearer, out var uid, out var uidError))
+            return uidError!;
 
         var (courses, error) = await _chessableHttp.GetCoursesAsync(request.Bearer, uid, ct);
         if (error is not null)
-        {
-            var cleanMessage = error.Trim() is "{}" or "" ? "Invalid bearer" : error;
-            return BadRequest(new { message = cleanMessage });
-        }
+            return BadRequest(new { message = CleanBearerError(error) });
 
         var result = courses!.Select(c => new CourseListItem(c.Key, c.Value)).ToList();
         return Ok(result);
@@ -163,14 +174,8 @@ public class ChessableDirectController : ControllerBase
         // Einheitliche Regel aller Kurs-Endpoints (Course/CourseInfo/StartCourse): Bearer ist NUR für
         // den echten Chessable-Abruf (Cache-Miss) nötig — ein gecachter Kurs wird auch ohne bedient.
         var bearer = request.Bearer ?? string.Empty;
-        string uid = string.Empty;
-        if (!string.IsNullOrWhiteSpace(bearer))
-        {
-            var (u, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
-            if (uidError is not null)
-                return BadRequest(new { message = uidError });
-            uid = u;
-        }
+        if (!TryGetOptionalUid(bearer, out var uid, out var uidError))
+            return uidError!;
 
         // ForceRefresh: gecachte Rohdaten überspringen → echter Neu-Abruf (Cache wird erst bei Erfolg ersetzt).
         var fetch = await _courseData.GetOrFetchAsync(request.Bid, bearer, uid, request.ForceRefresh, ct: ct);
@@ -183,10 +188,7 @@ public class ChessableDirectController : ControllerBase
         }
         var data = fetch.Data;
 
-        var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
-        mode.ApplyTo(lib);
-
-        lib.SetErrorDiagEvent(detail =>
+        var lib = CoursePgn.CreateLib(data, mode, detail =>
             _logger.LogWarning("Chessable-Parser " + LogWatcherContract.ParserSkipped + " (bid {Bid}, uid {Uid}): {Detail}", request.Bid, uid, detail));
 
         string pgn, courseName;
@@ -204,10 +206,8 @@ public class ChessableDirectController : ControllerBase
             _logger.LogWarning("Kurs bid {Bid} (uid {Uid}) mit {Errors} übersprungenen Linien/Kapiteln exportiert (Details siehe vorige Warnungen)", request.Bid, uid, lib.ErrorCount);
         }
 
-        var chapterCount = data?.ChapterList.Count ?? 0;
-        var lineCount = data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0;
-
-        return Ok(new DirectCourseResponse(request.Bid, courseName, mode.ToString(), chapterCount, lineCount, pgn));
+        return Ok(new DirectCourseResponse(request.Bid, courseName, mode.ToString(),
+            CoursePgn.ChapterCount(data), CoursePgn.LineCount(data), pgn));
     }
 
     /// <summary>
@@ -284,11 +284,6 @@ public class ChessableDirectController : ControllerBase
             r.Cleared.Select(o => o.ToString(inv)).ToList()));
     }
 
-    /// <summary>
-    /// Startet den tiefen Kurs-Abruf asynchron und liefert eine JobId. Der Fortschritt
-    /// (Kapitel/Linien) ist über <c>GET /api/chessable/direct/course/{jobId}</c> abrufbar; dort
-    /// kommt bei Status "completed" auch das fertige PGN. Für Fortschrittsanzeige in rookhub.
-    /// </summary>
     /// <summary>Ob die Rohdaten dieses Kurses schon gecacht sind (→ Import braucht keinen Chessable-Abruf).</summary>
     [HttpGet("course/{bid}/cached")]
     public async Task<IActionResult> CourseCached(string bid, CancellationToken ct)
@@ -344,9 +339,8 @@ public class ChessableDirectController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(request.Bearer))
             return BadRequest(new { message = "Bearer is required" });
-        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
-        if (uidError is not null)
-            return BadRequest(new { message = uidError });
+        if (!TryGetUid(request.Bearer, out var uid, out var uidError))
+            return uidError!;
 
         var (total, error) = await _chessableHttp.GetCourseLineCountAsync(request.Bearer, uid, request.Bid, ct);
         if (error is not null)
@@ -364,14 +358,18 @@ public class ChessableDirectController : ControllerBase
             return BadRequest(new { message = "Bearer is required" });
         if (request.Oid <= 0)
             return BadRequest(new { message = "Oid is required" });
-        var (uid, uidError) = _chessableHttp.ExtractUidFromBearer(request.Bearer);
-        if (uidError is not null)
-            return BadRequest(new { message = uidError });
+        if (!TryGetUid(request.Bearer, out var uid, out var uidError))
+            return uidError!;
 
         var (ok, bytes, ms, error, snippet) = await _chessableHttp.DebugFetchLineAsync(request.Bearer, uid, request.Oid, ct);
         return Ok(new DirectLineDebugResponse(request.Oid, uid, ok, bytes, ms, error, snippet));
     }
 
+    /// <summary>
+    /// Startet den tiefen Kurs-Abruf asynchron und liefert eine JobId. Der Fortschritt
+    /// (Kapitel/Linien) ist über <c>GET /api/chessable/direct/course/{jobId}</c> abrufbar; dort
+    /// kommt bei Status "completed" auch das fertige PGN. Für Fortschrittsanzeige in rookhub.
+    /// </summary>
     [HttpPost("course/start")]
     public async Task<IActionResult> StartCourse([FromBody] DirectCourseRequest request, CancellationToken ct)
     {
@@ -382,7 +380,7 @@ public class ChessableDirectController : ControllerBase
             return BadRequest(new { message = TrainingModes.InvalidModeMessage });
 
         // Bearer ist NUR für den echten Chessable-Abruf (Cache-Miss) nötig. Liegen die Rohdaten des
-        // Kurses bereits im (bid-weiten) Cache, kann RunFetchAsync sie ohne Chessable-Kontakt/uid
+        // Kurses bereits im (bid-weiten) Cache, kann der Job (CourseFetchJobRunner) sie ohne Chessable-Kontakt/uid
         // ausliefern → dann darf der Bearer fehlen (z. B. Admin-Re-Fetch eines Repertoires, dessen
         // Besitzer keinen Bearer (mehr) hinterlegt hat, der Kurs aber von jemand anderem gecacht wurde).
         var bearer = request.Bearer ?? string.Empty;
@@ -396,19 +394,10 @@ public class ChessableDirectController : ControllerBase
             // gecacht → uid bleibt leer (im Cache-Pfad ungenutzt); der Job nimmt die eben geladenen Daten,
             // statt den ganzen Kurs gleich noch einmal zu laden und zu entpacken (S2-018).
         }
-        else
-        {
-            var (u, uidError) = _chessableHttp.ExtractUidFromBearer(bearer);
-            if (uidError is not null)
-                return BadRequest(new { message = uidError });
-            uid = u;
-        }
+        else if (!TryGetUid(bearer, out uid, out var uidError))
+            return uidError!;
 
-        var jobId = Guid.NewGuid().ToString("N");
-        _jobStore.Create(jobId);
-        // Fire-and-forget: _chessableHttp + _jobStore sind Singletons → nach Controller-Dispose gültig.
-        // Abbruch über DELETE course/{jobId} oder beim Container-Stopp (siehe RunFetchAsync).
-        _ = Task.Run(() => RunFetchAsync(jobId, bearer, uid, request.Bid, mode, request.ForceRefresh, cached));
+        var jobId = _jobRunner.Start(bearer, uid, request.Bid, mode, request.ForceRefresh, cached);
         return Ok(new DirectCourseStartResponse(jobId));
     }
 
@@ -444,82 +433,5 @@ public class ChessableDirectController : ControllerBase
         var cancelled = job.Cancel();
         _jobStore.Remove(jobId);
         return Ok(new { cancelled });
-    }
-
-    /// <param name="preloaded">Im Start-Gate schon geladene Rohdaten (nur ohne Bearer und ohne Force-Refresh).</param>
-    private async Task RunFetchAsync(string jobId, string bearer, string uid, string bid, TrainingMode mode, bool forceRefresh = false,
-        piratechess_lib.RestResponseCourse? preloaded = null)
-    {
-        var job = _jobStore.Get(jobId);
-        if (job is null) return;
-        // Abbruch (S2-008): DELETE course/{jobId} oder Container-Stopp. Das Token reicht bis zum curl-Kill.
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(job.CancellationToken, _lifetime.ApplicationStopping);
-        var ct = cts.Token;
-        // Lifecycle-Logs dieses Fetch-Jobs für die zentrale Kibana-Filterung taggen → ECS `tags`.
-        using var _tagScope = LogContext.PushProperty("LogTags", "chessable,scrape");
-        try
-        {
-            var fetch = await _courseData.GetOrFetchAsync(bid, bearer, uid, forceRefresh, preloaded,
-                onChapterProgress: counter =>
-                {
-                    var parts = counter.Split('/');
-                    if (parts.Length == 2)
-                    {
-                        if (int.TryParse(parts[0].Trim(), out var d)) job.ChaptersDone = d;
-                        if (int.TryParse(parts[1].Trim(), out var t)) job.ChaptersTotal = t;
-                    }
-                },
-                onCumulativeLines: total =>
-                {
-                    if (int.TryParse(total.Trim(), out var l)) job.LinesDone = l;
-                },
-                onTotalLines: t => job.LinesTotal = t,
-                ct: ct);
-            if (fetch.BearerMissing)
-            {
-                // Der Start ohne Bearer wurde nur zugelassen, weil der Kurs gecacht war (StartCourse-Gate reicht
-                // die Daten mit). Ohne Daten liefe der Chessable-Fetch mit leerem Bearer in ein irreführendes
-                // „Invalid bearer" — stattdessen den echten Grund melden.
-                job.Fail("Kurs nicht (mehr) im Rohdaten-Cache und kein Bearer übergeben — Start mit Bearer wiederholen.");
-                return;
-            }
-            if (fetch.FetchError is not null)
-            {
-                job.Fail(fetch.FetchError);
-                return;
-            }
-            var data = fetch.Data;
-
-            if (data is not null)
-            {
-                job.ChaptersTotal = data.ChapterList.Count;
-                job.ChaptersDone = data.ChapterList.Count;
-                job.LinesDone = data.ChapterList.Sum(c => c.ResponseLineList.Count);
-                job.LinesTotal = job.LinesDone; // gecacht/fertig → vollständige Zahl
-            }
-
-            var lib = new piratechess_lib.PirateChessLib { restResponseCourse = data };
-            mode.ApplyTo(lib);
-
-            lib.SetErrorDiagEvent(detail =>
-                _logger.LogWarning("Chessable-Parser " + LogWatcherContract.ParserSkipped + " (job {JobId}, bid {Bid}): {Detail}", jobId, bid, detail));
-            ct.ThrowIfCancellationRequested();
-            var (pgn, courseName) = await Task.Run(() => lib.GetCourse(bid, useLocalData: true), ct);
-            if (lib.ErrorCount > 0)
-                _logger.LogWarning("Kurs-Fetch-Job {JobId} bid {Bid} mit {Errors} übersprungenen Linien/Kapiteln abgeschlossen", jobId, bid, lib.ErrorCount);
-            var lnCount = data?.ChapterList.Sum(c => c.ResponseLineList.Count) ?? 0;
-            if (lnCount > job.LinesTotal) job.LinesTotal = lnCount; // tatsächliche Zahl ist autoritativ
-            job.Complete(pgn, courseName, data?.ChapterList.Count ?? 0, lnCount);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            job.Cancel();
-            _logger.LogInformation("Kurs-Fetch-Job {JobId} bid {Bid} abgebrochen", jobId, bid);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Course fetch job {JobId} failed for bid {Bid}", jobId, bid);
-            job.Fail(ex.Message);
-        }
     }
 }

@@ -47,8 +47,8 @@ haben keinen Aufrufer mehr: die Registrierung ist standardmaessig aus
 
 - `ChessableDirectController`: duenne Endpunkte; Kursabruf ueber `CourseDataProvider` (Cache -> Bid-Lock ->
   Double-Check -> Fetch -> `RawCourseCache.SetAsync`), `TrainingMode` an einer Stelle, Browser-Parse in
-  `BrowserCourseParseService`. `course/start` legt einen Job in `CourseFetchJobStore` an (Poll per GET,
-  Abbruch per DELETE oder beim Container-Stopp).
+  `BrowserCourseParseService`, PGN-Schritt in `CoursePgn`. `course/start` legt ueber `CourseFetchJobRunner` einen
+  Job in `CourseFetchJobStore` an (Poll per GET, Abbruch per DELETE oder beim Container-Stopp).
 - `ChessableHttpService`: Fassade des Chessable-Abrufs (Login, Kursliste, Schaetzung, Diagnose); tiefer Kursabruf
   in `ChessableCourseFetcher` (Retry, Pruefregel, Linien-Cache; Rueckmeldungen per `CourseFetchOptions`), je
   Request `ChessableCurlTransport` (VPN-Lease, Soft-Block, Audit ueber `RawResponseAudit`), Prozess in `CurlRunner`,
