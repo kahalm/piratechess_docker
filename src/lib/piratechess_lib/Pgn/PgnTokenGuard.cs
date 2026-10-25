@@ -4,7 +4,7 @@ namespace piratechess_lib
 {
     /// <summary>
     /// Eingangsprüfung für Chessable-Felder, die ROH ins PGN geschrieben werden (Review 2026-09-29, S2-017).
-    /// Kommentare werden in <c>ReplaceCommentStuff</c> entschärft; Züge (San, Varianten-Züge), Pfeil-/Kreisfelder
+    /// Kommentare werden in <c>CommentText.Clean</c> entschärft; Züge (San, Varianten-Züge), Pfeil-/Kreisfelder
     /// und softFail-Alternativen stehen dagegen unverändert im Movetext bzw. in <c>{[%cal]}</c>/<c>{[%csl]}</c>/
     /// <c>{[%alt]}</c>. Eine vergiftete Linie aus dem geteilten Cache (Browser-Upload) konnte darüber mit
     /// Zeilenumbruch + <c>[Event …]</c> eine zweite Partie samt fremdem <c>[ChessableOid]</c> einschleusen.
