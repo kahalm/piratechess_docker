@@ -8,7 +8,7 @@ public readonly record struct CourseDataResult(RestResponseCourse? Data, bool Be
 
 /// <summary>
 /// Rohdaten eines Kurses aus dem (bid-weiten) Cache oder frisch von Chessable (S2-015): Cache lesen → Per-bid-Lock
-/// → Double-Check → Abruf → Cache schreiben. Eine Stelle für den synchronen course-Endpoint und den course/start-Job.
+/// → Double-Check → Abruf → Cache schreiben. Genutzt vom course/start-Job (der synchrone course-Endpoint ist seit I2-011 entfernt).
 /// </summary>
 public class CourseDataProvider
 {

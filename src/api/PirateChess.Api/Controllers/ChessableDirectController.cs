@@ -27,7 +27,6 @@ public class ChessableDirectController : ControllerBase
     private readonly CourseFetchJobRunner _jobRunner;
     private readonly RawCourseCache _rawCache;
     private readonly RawLineCache _lineCache;
-    private readonly CourseDataProvider _courseData;
     private readonly BrowserCourseParseService _browserParse;
     private readonly RawCourseReconstructor _reconstructor;
     private readonly VpnIpHealth _ipHealth;
@@ -40,7 +39,6 @@ public class ChessableDirectController : ControllerBase
         CourseFetchJobRunner jobRunner,
         RawCourseCache rawCache,
         RawLineCache lineCache,
-        CourseDataProvider courseData,
         BrowserCourseParseService browserParse,
         RawCourseReconstructor reconstructor,
         VpnIpHealth ipHealth,
@@ -52,7 +50,6 @@ public class ChessableDirectController : ControllerBase
         _jobRunner = jobRunner;
         _rawCache = rawCache;
         _lineCache = lineCache;
-        _courseData = courseData;
         _browserParse = browserParse;
         _reconstructor = reconstructor;
         _ipHealth = ipHealth;
@@ -157,66 +154,12 @@ public class ChessableDirectController : ControllerBase
     }
 
     /// <summary>
-    /// Tiefer Kurs-Abruf: holt die komplette Kursstruktur (Kapitel/Linien/PGN) und gibt sie als
-    /// ein PGN zurück, dessen Trainingsannotation per <c>Mode</c> gesteuert wird. rookhub nutzt
-    /// das, um denselben Kurs als Repertoire (<c>None</c>) oder als Buch (<c>FirstKeyMove</c>,
-    /// erster Key-Zug trainierbar) zu importieren. Bearer wird nicht persistiert.
-    /// </summary>
-    [HttpPost("course")]
-    public async Task<IActionResult> Course([FromBody] DirectCourseRequest request, CancellationToken ct)
-    {
-        if (!IsValidBid(request?.Bid))
-            return BadRequest(new { message = "Invalid bid" });
-
-        if (!TrainingModes.TryParseOrDefault(request!.Mode, TrainingMode.FirstKeyMove, out var mode))
-            return BadRequest(new { message = TrainingModes.InvalidModeMessage });
-
-        // Einheitliche Regel aller Kurs-Endpoints (Course/CourseInfo/StartCourse): Bearer ist NUR für
-        // den echten Chessable-Abruf (Cache-Miss) nötig — ein gecachter Kurs wird auch ohne bedient.
-        var bearer = request.Bearer ?? string.Empty;
-        if (!TryGetOptionalUid(bearer, out var uid, out var uidError))
-            return uidError!;
-
-        // ForceRefresh: gecachte Rohdaten überspringen → echter Neu-Abruf (Cache wird erst bei Erfolg ersetzt).
-        var fetch = await _courseData.GetOrFetchAsync(request.Bid, bearer, uid, request.ForceRefresh, ct: ct);
-        if (fetch.BearerMissing)
-            return BadRequest(new { message = "Bearer is required" });
-        if (fetch.FetchError is { } cleanMessage)
-        {
-            _logger.LogWarning("Course fetch failed for bid {Bid} (uid {Uid}): {Error}", request.Bid, uid, cleanMessage);
-            return BadRequest(new { message = cleanMessage });
-        }
-        var data = fetch.Data;
-
-        var lib = CoursePgn.CreateLib(data, mode, detail =>
-            _logger.LogWarning("Chessable-Parser " + LogWatcherContract.ParserSkipped + " (bid {Bid}, uid {Uid}): {Detail}", request.Bid, uid, detail));
-
-        string pgn, courseName;
-        try
-        {
-            (pgn, courseName) = await Task.Run(() => lib.GetCourse(request.Bid, useLocalData: true), ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "PGN generation failed for bid {Bid} (uid {Uid})", request.Bid, uid);
-            return BadRequest(new { message = $"PGN generation failed: {ex.Message}" });
-        }
-        if (lib.ErrorCount > 0)
-        {
-            _logger.LogWarning("Kurs bid {Bid} (uid {Uid}) mit {Errors} übersprungenen Linien/Kapiteln exportiert (Details siehe vorige Warnungen)", request.Bid, uid, lib.ErrorCount);
-        }
-
-        return Ok(new DirectCourseResponse(request.Bid, courseName, mode.ToString(),
-            CoursePgn.ChapterCount(data), CoursePgn.LineCount(data), pgn));
-    }
-
-    /// <summary>
     /// Fetch-freier Parse: nimmt bereits (vom Browser über die RepCheck-Extension) erfasstes rohes
     /// Chessable-JSON — je Kapitel die getList-Antwort (<c>ChapterJson</c>) plus die getGame-Antworten
     /// (<c>Lines</c>) in getList-Reihenfolge — und erzeugt daraus dasselbe PGN wie der Live-Abruf, OHNE
     /// Chessable-Kontakt/VPN und OHNE Bearer. Der Browser hat die Daten als echte eingeloggte Session
     /// geholt (passiert Cloudflare); piratechess parst hier nur. <c>Mode</c> steuert die Trainingsannotation
-    /// wie bei <see cref="Course"/> ("None"→Repertoire, "FirstKeyMove"→Buch, "AllKeyMoves").
+    /// wie bei <see cref="StartCourse"/> ("None"→Repertoire, "FirstKeyMove"→Buch, "AllKeyMoves").
     /// </summary>
     // Eigenes, größeres Body-Limit (überschreibt das klassenweite 256-KB-Limit): hier kommt das rohe
     // Chessable-JSON GANZER Kurse an (36+ MB dokumentiert, s. RawCourseCache) — Kestrels 28,6-MB-Default
@@ -332,7 +275,7 @@ public class ChessableDirectController : ControllerBase
             return BadRequest(new { message = "Invalid bid" });
 
         // Gecacht → Gesamtzahl ohne Chessable-Abruf aus den Rohdaten. Bearer wird — wie bei
-        // Course/StartCourse — erst beim Cache-Miss verlangt (echter Chessable-Abruf nötig).
+        // StartCourse — erst beim Cache-Miss verlangt (echter Chessable-Abruf nötig).
         var cached = await _rawCache.GetAsync(request!.Bid, ct);
         if (cached is not null)
             return Ok(new DirectCourseInfoResponse(request.Bid, cached.ChapterList.Sum(c => c.ResponseLineList.Count), true));

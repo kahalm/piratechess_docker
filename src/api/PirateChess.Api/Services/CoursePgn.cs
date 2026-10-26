@@ -3,7 +3,7 @@ using piratechess_lib;
 namespace PirateChess.Api.Services;
 
 /// <summary>
-/// Gemeinsamer PGN-Schritt des synchronen Kursabrufs und des course/start-Jobs (Zerlegung Z47): Bibliothek mit den
+/// PGN-Schritt des course/start-Jobs (Zerlegung Z47; der synchrone Kursabruf ist seit I2-011 entfernt): Bibliothek mit den
 /// Rohdaten anlegen, Trainingsmodus setzen, übersprungene Linien/Kapitel melden lassen; Zählungen der Rohdaten.
 /// </summary>
 public static class CoursePgn

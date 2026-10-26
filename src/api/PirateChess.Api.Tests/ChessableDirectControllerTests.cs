@@ -217,6 +217,18 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     // --- /api/chessable/direct/course/start (tiefer Kurs-Abruf für rookhub-Import) ---
 
     [Fact]
+    public async Task PostCourse_SyncEndpointRetired_Returns404()
+    {
+        // I2-011: der synchrone Kursabruf ist entfernt (rookhub nutzt seit 0.837.2 nur course/start + Poll).
+        var client = ClientWithServiceKey();
+
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task CourseStart_InvalidMode_Returns400()
     {
         var client = ClientWithServiceKey();

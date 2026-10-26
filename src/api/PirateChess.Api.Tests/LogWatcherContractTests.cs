@@ -43,7 +43,7 @@ public class LogWatcherContractTests
     [Theory]
     [InlineData(nameof(LogWatcherContract.CurlExited), 1)]
     [InlineData(nameof(LogWatcherContract.IpRepeatedlyBad), 1)]
-    [InlineData(nameof(LogWatcherContract.ParserSkipped), 4)]
+    [InlineData(nameof(LogWatcherContract.ParserSkipped), 3)]  // Job-Lauf, Browser-Parse, Export (synchroner course-Endpunkt seit I2-011 entfernt)
     public void Log_templates_are_built_from_the_contract_constants(string constant, int expectedSites)
     {
         var apiDir = Path.Combine(BuildHardeningTests.RepoRoot(), "src", "api", "PirateChess.Api");
