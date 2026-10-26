@@ -13,9 +13,10 @@ using PirateChess.Api.Services;
 namespace PirateChess.Api.Tests;
 
 /// <summary>
-/// Charakterisierung vor der Zerlegung Z47 (Job-Lauf aus dem Controller in einen Dienst): der course/start-Job liefert
-/// dasselbe PGN und dieselben Zahlen wie der synchrone course-Endpunkt, Fortschrittszähler am Ende vollständig, und
-/// ein Fehler des Chessable-Abrufs kommt als dieselbe Meldung an (synchron 400, Job „failed").
+/// Der course/start-Job liefert dasselbe PGN und dieselben Zahlen wie der PGN-Schritt (<see cref="CoursePgn"/>) direkt
+/// über die gecachten Rohdaten — so tat es der synchrone course-Endpunkt, den es seit I2-011 nicht mehr gibt —,
+/// Fortschrittszähler am Ende vollständig, ohne Mode gilt FirstKeyMove, und ein Fehler des Chessable-Abrufs kommt als
+/// bereinigte Meldung im Job („failed") an.
 /// </summary>
 public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
 {
@@ -31,7 +32,7 @@ public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
         return client;
     }
 
-    private static async Task SeedAsync(IServiceProvider services, string bid)
+    private static async Task<RestResponseCourse> SeedAsync(IServiceProvider services, string bid)
     {
         var course = new RestResponseCourse
         {
@@ -43,7 +44,7 @@ public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
                     ChapterJsonContent = "{\"list\":{\"name\":\"Ch1\",\"title\":\"T\",\"data\":[{\"id\":10,\"name\":\"L1\"},{\"id\":11,\"name\":\"L2\"}]}}",
                     ResponseLineList =
                     [
-                        new RestResponseLine { Oid = 10, LineJsonContent = "{\"game\":{\"color\":\"white\",\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"e4\"},{\"id\":1,\"move\":1,\"san\":\"e5\"}]}}" },
+                        new RestResponseLine { Oid = 10, LineJsonContent = "{\"game\":{\"color\":\"white\",\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"e4\",\"isKey\":true},{\"id\":1,\"move\":1,\"san\":\"e5\"}]}}" },
                         new RestResponseLine { Oid = 11, LineJsonContent = "{\"game\":{\"color\":\"white\",\"initial\":\"\",\"data\":[{\"id\":0,\"move\":1,\"san\":\"d4\"}]}}" },
                     ]
                 },
@@ -66,6 +67,14 @@ public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
             CachedAt = DateTime.UtcNow
         });
         await db.SaveChangesAsync();
+        return course;
+    }
+
+    /// <summary>Was der synchrone course-Endpunkt aus denselben Rohdaten erzeugte: CoursePgn + GetCourse(useLocalData).</summary>
+    private static (string Pgn, string Name) DirectPgn(RestResponseCourse course, string bid, TrainingMode mode)
+    {
+        var lib = CoursePgn.CreateLib(course, mode, _ => { });
+        return lib.GetCourse(bid, useLocalData: true);
     }
 
     private static async Task<ProgressResp> RunJobAsync(HttpClient client, object request)
@@ -86,27 +95,38 @@ public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
     [InlineData("None")]
     [InlineData("FirstKeyMove")]
     [InlineData("AllKeyMoves")]
-    public async Task Job_And_SyncCourse_GiveTheSamePgnAndCounts(string mode)
+    public async Task Job_GivesTheSamePgnAndCountsAsTheDirectPgnStep(string mode)
     {
         var bid = "58" + Random.Shared.Next(1000, 9999);
-        await SeedAsync(_factory.Services, bid);
+        var course = await SeedAsync(_factory.Services, bid);
         var client = Client(_factory);
-
-        var sync = await client.PostAsJsonAsync("/api/chessable/direct/course", new { Bearer = "", Bid = bid, Mode = mode });
-        Assert.Equal(HttpStatusCode.OK, sync.StatusCode);
-        var course = (await sync.Content.ReadFromJsonAsync<CourseResp>(JsonOpts))!;
+        var (pgn, name) = DirectPgn(course, bid, Enum.Parse<TrainingMode>(mode));
 
         var job = await RunJobAsync(client, new { Bearer = "", Bid = bid, Mode = mode });
 
         Assert.Equal("completed", job.Status);
         Assert.Null(job.Error);
-        Assert.Equal(course.Pgn, job.Pgn);
-        Assert.Equal(course.Name, job.CourseName);
-        Assert.Equal(mode, course.Mode);
-        Assert.Equal((2, 3), (course.ChapterCount, course.LineCount));
+        Assert.Equal(pgn, job.Pgn);
+        Assert.Equal(name, job.CourseName);
+        Assert.Equal((2, 3), (CoursePgn.ChapterCount(course), CoursePgn.LineCount(course)));
         Assert.Equal((2, 3), (job.ChapterCount, job.LineCount));
         Assert.Equal((2, 2, 3, 3), (job.ChaptersDone, job.ChaptersTotal, job.LinesDone, job.LinesTotal));
         Assert.Contains("c4", job.Pgn);
+    }
+
+    [Fact]
+    public async Task Job_NoMode_DefaultsToFirstKeyMove()
+    {
+        // Standard je Route bleibt: course/start → FirstKeyMove, course/parse → None.
+        var bid = "57" + Random.Shared.Next(1000, 9999);
+        var course = await SeedAsync(_factory.Services, bid);
+        var client = Client(_factory);
+
+        var job = await RunJobAsync(client, new { Bearer = "", Bid = bid });
+
+        Assert.Equal("completed", job.Status);
+        Assert.Equal(DirectPgn(course, bid, TrainingMode.FirstKeyMove).Pgn, job.Pgn);
+        Assert.NotEqual(DirectPgn(course, bid, TrainingMode.None).Pgn, job.Pgn);
     }
 
     /// <summary>Fake, dessen Kursabruf mit einer festen Fehlermeldung scheitert; alles andere wie der Standard-Fake.</summary>
@@ -132,7 +152,7 @@ public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
     [Theory]
     [InlineData("Chessable: You do not own this course", "Chessable: You do not own this course")]
     [InlineData(" {} ", "Invalid bearer")]
-    public async Task FetchError_SyncReturns400_JobFails_WithTheSameMessage(string fetchError, string expected)
+    public async Task FetchError_JobFails_WithTheCleanMessage(string fetchError, string expected)
     {
         using var host = _factory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
         {
@@ -142,10 +162,6 @@ public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
         var client = Client(host);
         var request = new { Bearer = "some-valid-jwt", Bid = "59" + Random.Shared.Next(1000, 9999), Mode = "None" };
 
-        var sync = await client.PostAsJsonAsync("/api/chessable/direct/course", request);
-        Assert.Equal(HttpStatusCode.BadRequest, sync.StatusCode);
-        Assert.Equal(expected, (await sync.Content.ReadFromJsonAsync<MessageResp>(JsonOpts))!.Message);
-
         var job = await RunJobAsync(client, request);
         Assert.Equal("failed", job.Status);
         Assert.Equal(expected, job.Error);
@@ -153,8 +169,6 @@ public class CourseJobRunTests : IClassFixture<TestWebApplicationFactory>
     }
 
     private record JobStartResp(string JobId);
-    private record MessageResp(string Message);
-    private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
     private record ProgressResp(string Status, int ChaptersDone, int ChaptersTotal, int LinesDone, int LinesTotal,
         int ChapterCount, int LineCount, string? CourseName, string? Pgn, string? Error);
 }

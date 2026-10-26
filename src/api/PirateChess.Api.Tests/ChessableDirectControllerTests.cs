@@ -214,43 +214,7 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
-    // --- /api/chessable/direct/course (tiefer Kurs-Abruf für rookhub-Import) ---
-
-    [Fact]
-    public async Task Course_MissingServiceKey_Returns401()
-    {
-        var client = _factory.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
-
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Course_InvalidMode_Returns400()
-    {
-        var client = ClientWithServiceKey();
-
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "Nonsense" });
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Course_NoMode_DefaultsToFirstKeyMove()
-    {
-        // Standard je Route bleibt: course und course/start → FirstKeyMove, course/parse → None.
-        var client = ClientWithServiceKey();
-
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "some-valid-jwt", Bid = "1001" });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
-        Assert.Equal("FirstKeyMove", body!.Mode);
-    }
+    // --- /api/chessable/direct/course/start (tiefer Kurs-Abruf für rookhub-Import) ---
 
     [Fact]
     public async Task CourseStart_InvalidMode_Returns400()
@@ -264,40 +228,26 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
-    public async Task Course_MissingBid_Returns400()
+    public async Task CourseStart_MissingBid_Returns400()
     {
         var client = ClientWithServiceKey();
 
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+        var response = await client.PostAsJsonAsync("/api/chessable/direct/course/start",
             new { Bearer = "some-valid-jwt", Bid = "", Mode = "None" });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
-    public async Task Course_InvalidBearer_Returns400()
+    public async Task CourseStart_ValidRequest_JobCompletesWithPgn()
     {
         var client = ClientWithServiceKey();
 
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "not-a-real-jwt", Bid = "1001", Mode = "None" });
+        var job = await RunJobAsync(client, new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Course_ValidRequest_ReturnsCourseEnvelope()
-    {
-        var client = ClientWithServiceKey();
-
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "some-valid-jwt", Bid = "1001", Mode = "None" });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
-        Assert.Equal("1001", body!.Bid);
-        Assert.Equal("None", body.Mode);
-        Assert.NotNull(body.Pgn);
+        Assert.Equal("completed", job.Status);
+        Assert.Null(job.Error);
+        Assert.NotNull(job.Pgn);
     }
 
     // ---- /course/start + /course/{jobId} (async mit Fortschritt) ----
@@ -384,30 +334,16 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
-    public async Task Course_NoBearer_Cached_ReturnsCourse()
+    public async Task CourseStart_NoBearer_Cached_JobDeliversCachedCourse()
     {
-        // Dieselbe Regel wie bei course/start: gecacht → Bearer optional (synchroner Endpoint).
+        // Gecacht → Bearer optional, und der Job liefert den gecachten Kurs aus.
         await SeedCompleteCachedCourseAsync("424243");
         var client = ClientWithServiceKey();
 
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "", Bid = "424243", Mode = "None" });
+        var job = await RunJobAsync(client, new { Bearer = "", Bid = "424243", Mode = "None" });
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
-        Assert.Equal("424243", body!.Bid);
-        Assert.Contains("e4", body.Pgn);
-    }
-
-    [Fact]
-    public async Task Course_NoBearer_NotCached_Returns400()
-    {
-        var client = ClientWithServiceKey();
-
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "", Bid = "999998", Mode = "None" });
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("completed", job.Status);
+        Assert.Contains("e4", job.Pgn);
     }
 
     [Fact]
@@ -478,33 +414,19 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     }
 
     [Fact]
-    public async Task Course_ForceRefresh_WithoutBearer_Returns400_EvenIfCached()
-    {
-        // Force-Refresh heißt echter Chessable-Abruf → der „gecacht ⇒ Bearer optional"-Pfad greift nicht.
-        await SeedCompleteCachedCourseAsync("424251");
-        var client = ClientWithServiceKey();
-
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
-            new { Bearer = "", Bid = "424251", Mode = "None", ForceRefresh = true });
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Course_ForceRefresh_DropsCachedRawDataAndRefetches()
+    public async Task CourseStart_ForceRefresh_DropsCachedRawDataAndRefetches()
     {
         await SeedCompleteCachedCourseAsync("424252");
         var client = ClientWithServiceKey();
 
-        var response = await client.PostAsJsonAsync("/api/chessable/direct/course",
+        var job = await RunJobAsync(client,
             new { Bearer = "some-valid-jwt", Bid = "424252", Mode = "None", ForceRefresh = true });
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<CourseResp>(JsonOpts);
+        Assert.Equal("completed", job.Status);
         // Der gecachte Stand hatte 1 Kapitel/1 Linie („e4"); die Fake-Neuabfrage liefert einen
         // leeren Kurs → der alte Cache wurde tatsächlich verworfen und nicht wieder bedient.
-        Assert.Equal(0, body!.ChapterCount);
-        Assert.DoesNotContain("e4", body.Pgn);
+        Assert.Equal(0, job.ChapterCount);
+        Assert.DoesNotContain("e4", job.Pgn);
     }
 
     [Fact]
@@ -669,4 +591,21 @@ public class ChessableDirectControllerTests : IClassFixture<TestWebApplicationFa
     private record CourseResp(string Bid, string Name, string Mode, int ChapterCount, int LineCount, string Pgn);
     private record CourseInfoResp(string Bid, int TotalLines, bool Cached);
     private record JobStartResp(string JobId);
+    private record ProgressResp(string Status, int ChaptersDone, int ChaptersTotal, int LinesDone, int LinesTotal,
+        int ChapterCount, int LineCount, string? CourseName, string? Pgn, string? Error);
+
+    /// <summary>Startet einen Kurs-Abruf-Job und pollt bis zum Ende (Terminal-Read).</summary>
+    private static async Task<ProgressResp> RunJobAsync(HttpClient client, object request)
+    {
+        var start = await client.PostAsJsonAsync("/api/chessable/direct/course/start", request);
+        Assert.Equal(HttpStatusCode.OK, start.StatusCode);
+        var jobId = (await start.Content.ReadFromJsonAsync<JobStartResp>(JsonOpts))!.JobId;
+        for (var i = 0; i < 200; i++)
+        {
+            var poll = await client.GetFromJsonAsync<ProgressResp>($"/api/chessable/direct/course/{jobId}", JsonOpts);
+            if (poll!.Status != "running") return poll;
+            await Task.Delay(50);
+        }
+        throw new TimeoutException("Job nicht fertig geworden");
+    }
 }
