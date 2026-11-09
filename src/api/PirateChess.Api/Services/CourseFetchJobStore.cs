@@ -121,7 +121,8 @@ public class CourseFetchJobStore
     /// <summary>
     /// Entfernt verwaiste Jobs: terminale älter als <see cref="TerminalTtl"/>, JEDEN älter als
     /// <see cref="MaxJobAge"/>, und — falls weiterhin über <see cref="MaxJobs"/> — die ältesten
-    /// (terminale zuerst), bis das Limit eingehalten ist. Gibt die Anzahl entfernter Jobs zurück.
+    /// (terminale zuerst), bis das Limit eingehalten ist. Laufende Jobs werden dabei per
+    /// <see cref="CourseFetchJob.Cancel"/> abgebrochen (S1-006). Gibt die Anzahl entfernter Jobs zurück.
     /// <paramref name="nowUtc"/> ist Parameter (testbar ohne Wall-Clock).
     /// </summary>
     public int Prune(DateTime nowUtc)
@@ -133,7 +134,13 @@ public class CourseFetchJobStore
             var terminal = snap.Status is "completed" or "failed" or "cancelled";
             var tooOld = nowUtc - job.CreatedAt > MaxJobAge;
             var terminalExpired = terminal && job.TerminalAt is { } t && nowUtc - t > TerminalTtl;
-            if ((tooOld || terminalExpired) && _jobs.TryRemove(id, out _)) removed++;
+            if ((tooOld || terminalExpired) && _jobs.TryRemove(id, out _))
+            {
+                // S1-006: ein laufender Job wird vor dem Entfernen abgebrochen — sonst liefe sein Abruf
+                // unkündbar weiter (DELETE course/{jobId} fände ihn nicht mehr) über die VPN-IP.
+                job.Cancel();
+                removed++;
+            }
         }
 
         if (_jobs.Count > MaxJobs)
@@ -146,7 +153,11 @@ public class CourseFetchJobStore
                 .Select(kv => kv.Key)
                 .ToList();
             foreach (var id in overflow)
-                if (_jobs.TryRemove(id, out _)) removed++;
+                if (_jobs.TryRemove(id, out var job))
+                {
+                    job.Cancel();   // S1-006: laufende vor dem Entfernen abbrechen (terminale: no-op)
+                    removed++;
+                }
         }
 
         return removed;

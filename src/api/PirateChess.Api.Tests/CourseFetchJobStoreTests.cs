@@ -46,6 +46,46 @@ public class CourseFetchJobStoreTests
     }
 
     [Fact]
+    public void Prune_RunningJobOlderThanMaxAge_IsCancelledBeforeRemoval()
+    {
+        // S1-006: der Fetch-Task hält eine eigene Referenz — ohne Cancel liefe der Abruf unkündbar weiter.
+        var store = new CourseFetchJobStore();
+        var stuck = store.Create("stuck");
+        stuck.CreatedAt = Now - TimeSpan.FromHours(7);
+
+        store.Prune(Now);
+
+        Assert.Null(store.Get("stuck"));
+        Assert.True(stuck.CancellationToken.IsCancellationRequested);
+        Assert.Equal("cancelled", stuck.Snapshot().Status);
+    }
+
+    [Fact]
+    public void Prune_Overflow_CancelsRemovedRunningJobs_LeavesTerminalStatus()
+    {
+        // Wall-Clock-Basis: Create pruned lazy mit DateTime.UtcNow — die Alter bleiben weit unter MaxJobAge.
+        var baseUtc = DateTime.UtcNow;
+        var store = new CourseFetchJobStore();
+        var jobs = new List<CourseFetchJob>();
+        for (var i = 0; i < CourseFetchJobStore.MaxJobs; i++) jobs.Add(store.Create("j" + i));
+        for (var i = 0; i < jobs.Count; i++) jobs[i].CreatedAt = baseUtc - TimeSpan.FromSeconds(1000 - i);   // j0 ältester
+        jobs[5].Complete("PGN", "Done", 1, 1);   // terminal → fliegt zuerst raus, bleibt "completed"
+
+        store.Create("extra1");
+        store.Create("extra2");   // Lazy-Prune: 501 > MaxJobs → der terminale j5 geht
+        store.Prune(baseUtc);     // 501 > MaxJobs → der älteste laufende j0 geht
+
+        Assert.Equal(CourseFetchJobStore.MaxJobs, store.Count);
+        Assert.Null(store.Get("j5"));
+        Assert.Equal("completed", jobs[5].Snapshot().Status);
+        Assert.False(jobs[5].CancellationToken.IsCancellationRequested);
+        Assert.Null(store.Get("j0"));
+        Assert.True(jobs[0].CancellationToken.IsCancellationRequested);   // S1-006: abgebrochen, nicht nur vergessen
+        Assert.NotNull(store.Get("j1"));
+        Assert.False(jobs[1].CancellationToken.IsCancellationRequested);
+    }
+
+    [Fact]
     public void Cancel_RunningJob_SetsCancelled_AndSignalsToken()
     {
         var store = new CourseFetchJobStore();
