@@ -278,6 +278,24 @@ public class PirateChessLibTests
         Assert.DoesNotContain("[%tqu", pgn);   // Repertoire-Modus setzt weiterhin keinen Marker
     }
 
+    // Regression (2026-11-10): oid- und Farb-Header wurden mit „\n" + 24 Leerzeichen in den Raw-String gesetzt —
+    // die zweite Kopfzeile stand eingerückt, danach eine Leerzeichen-Zeile. rookhubs Viewer las
+    // „[ChessableColor …]" deshalb als Movetext und hängte die Kommentare zwei Halbzüge zu spät an.
+    [Theory]
+    [InlineData("white")]
+    [InlineData("")]
+    public void GetCourse_HeaderLines_StartInColumnZero_NoWhitespaceOnlyLines(string color)
+    {
+        var pgn = PgnForLine(TwoMoveLine(color), noTrainingMove: true);
+        var lines = pgn.Replace("\r\n", "\n").Split('\n');
+
+        Assert.All(lines.Where(l => l.TrimStart().StartsWith('[')), l => Assert.Equal(l.TrimStart(), l));
+        Assert.DoesNotContain(lines, l => l.Length > 0 && string.IsNullOrWhiteSpace(l));
+        Assert.Contains("[Result \"*\"]\n[ChessableOid \"73000253\"]", pgn);
+        if (color != "")
+            Assert.Contains("[ChessableOid \"73000253\"]\n[ChessableColor \"white\"]\n\n", pgn);
+    }
+
     [Fact]
     public void GetCourse_LineWithoutColor_WritesNoColorHeader()
     {

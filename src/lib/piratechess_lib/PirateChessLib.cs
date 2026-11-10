@@ -345,7 +345,7 @@ namespace piratechess_lib
                 // (rookhub) jede importierte Linie eindeutig ihrer Chessable-Linie zuordnen kann
                 // (Fortschritts-Overlays). Nur wenn vorhanden + numerisch (Header-Injection vermeiden).
                 var oidTag = (!string.IsNullOrWhiteSpace(oid) && oid.All(char.IsAsciiDigit))
-                    ? $"[ChessableOid \"{oid}\"]\n                        " : "";
+                    ? $"\n[ChessableOid \"{oid}\"]" : "";
 
                 // Solverfarbe der Linie als Header. Im Repertoire-Modus ("None") steht KEIN [%tqu] im
                 // PGN — ohne diese Angabe kann die konsumierende Seite (rookhub) nicht wissen, ob der
@@ -356,8 +356,13 @@ namespace piratechess_lib
                 var lineColor = game?.Game?.Color ?? "";
                 var colorTag = lineColor.Equals("white", StringComparison.OrdinalIgnoreCase)
                                || lineColor.Equals("black", StringComparison.OrdinalIgnoreCase)
-                    ? $"[ChessableColor \"{lineColor.ToLowerInvariant()}\"]\n                        " : "";
+                    ? $"\n[ChessableColor \"{lineColor.ToLowerInvariant()}\"]" : "";
 
+                // Die Zusatz-Header beginnen mit dem Zeilenumbruch und hängen DIREKT an [Result]: ein Raw-String
+                // rückt eingesetzte Werte nicht ein, ein „\n" im Wert ließ die zweite Kopfzeile mit 24 Leerzeichen
+                // beginnen (und eine Leerzeichen-Zeile folgen). rookhubs Viewer erkannte die eingerückte Zeile nicht
+                // als Header, zählte „[ChessableColor "white"]" als zwei Züge und hängte jeden Kommentar zwei
+                // Halbzüge zu spät an (gemeldet 2026-11-10).
                 // Der Movetext endet mit dem ERGEBNIS-Marker. PGN verlangt ihn (hier immer „*" — eine
                 // Chessable-Linie ist keine beendete Partie); ohne ihn melden strenge Leser eine
                 // unvollständige Partie, und ChessBase zeigt die letzte Variante an der Stelle, wo das
@@ -369,8 +374,8 @@ namespace piratechess_lib
                         [White "{EscapeHeader(pgnHeader.White)}"]
                         [Black "{EscapeHeader(pgnHeader.Black)}"]
                         [FEN "{EscapeHeader(pgnHeader.FEN)}"]
-                        [Result "*"]
-                        {oidTag}{colorTag}
+                        [Result "*"]{oidTag}{colorTag}
+
                         {pgn}*
 
 
