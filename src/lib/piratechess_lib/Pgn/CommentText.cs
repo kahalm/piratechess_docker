@@ -10,11 +10,15 @@ namespace piratechess_lib
         {
             comment = comment.Replace("@@StartBracket@@", "(").Replace("@@EndBracket@@", ")");
             comment = findFenTags().Replace(comment, "");
-            comment = comment.Replace("@@StartBlockQuote@@", "").Replace("@@EndBlockQuote@@", "");
+            // Absatz-Grenzen (Zeilenumbruch, Zitat-/Überschrift-Block, Block-HTML) werden zu einem Leerzeichen, nicht
+            // zu nichts: Chessable schreibt Absätze oft ohne Leerraum („…next few moves.<br><br>In comparison…",
+            // „…umwandeln.@@EndBlockQuote@@Sollte…"), sonst klebten die Sätze aneinander („moves.In",
+            // gemeldet 2026-11-10). Mehrfach-Leerraum fasst findWhitespace unten zusammen.
+            comment = comment.Replace("@@StartBlockQuote@@", " ").Replace("@@EndBlockQuote@@", " ");
             comment = comment.Replace("@@LinkStart@@", "").Replace("@@LinkEnd@@", "");
             comment = comment.Replace("@@SANStart@@", "").Replace("@@SANEnd@@", "");
-            comment = comment.Replace("@@HeaderStart@@", "").Replace("@@HeaderEnd@@", "");
-            comment = comment.Replace("<br/>", "").Replace("<br>", "");
+            comment = comment.Replace("@@HeaderStart@@", " ").Replace("@@HeaderEnd@@", " ");
+            comment = findBlockTags().Replace(comment, " ");
             comment = comment.Replace("</strong>", "").Replace("<strong>", "");
             comment = comment.Replace("</bold>", "").Replace("<bold>", "");
             comment = findHtmltags().Replace(comment, "");
@@ -39,6 +43,9 @@ namespace piratechess_lib
 
             return comment;
         }
+
+        [GeneratedRegex(@"<\s*/?\s*(br|p|div|li|ul|ol|blockquote|h[1-6]|tr|td|table|hr)\b[^>]*>", RegexOptions.IgnoreCase)]
+        private static partial Regex findBlockTags();
 
         [GeneratedRegex("<[^>]*>")]
         private static partial Regex findHtmltags();

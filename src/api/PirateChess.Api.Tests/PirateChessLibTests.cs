@@ -847,6 +847,30 @@ public class PirateChessLibTests
     // und mit „3..." vor dem schwarzen Zug nach den Varianten.
     private static string Json(object o) => System.Text.Json.JsonSerializer.Serialize(o);
 
+    // Regression (2026-11-10): Absatz-Grenzen ohne Leerraum („moves.<br><br>In", „@@EndBlockQuote@@Sollte",
+    // „</p><p>") wurden ersatzlos entfernt — im Kommentar klebten die Sätze aneinander („moves.In comparison").
+    [Theory]
+    [InlineData("next few moves.<br><br>In comparison", "next few moves. In comparison")]
+    [InlineData("next few moves.<br/>In comparison", "next few moves. In comparison")]
+    [InlineData("next few moves.<br />In comparison", "next few moves. In comparison")]
+    [InlineData("<p>next few moves.</p><p>In comparison</p>", "next few moves. In comparison")]
+    [InlineData("umwandeln.@@EndBlockQuote@@Sollte", "umwandeln. Sollte")]
+    [InlineData("@@HeaderStart@@Intro@@HeaderEnd@@Numerous", "Intro Numerous")]
+    [InlineData("Alles außer <strong>2.d4</strong>.", "Alles außer 2.d4.")]   // Inline-Tags weiter ohne Leerzeichen
+    public void GeneratePGN_ParagraphBreaks_BecomeSpace(string chessable, string expected)
+    {
+        var game = new Game
+        {
+            Initial = StartFen,
+            Data = [ new JsonMove { Id = 0, Move = 1, San = "e4", Col = "w",
+                After = Json(new { data = new object[] { new { key = "C", val = chessable } } }) } ],
+        };
+
+        var pgn = game.GeneratePGN(noTrainingMove: true);
+
+        Assert.Contains("{" + expected + "}", pgn);
+    }
+
     [Fact]
     public void GeneratePGN_RealLine_MatchesChessableExportFormatting()
     {
